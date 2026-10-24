@@ -1,0 +1,36 @@
+{
+  "dns": {
+    "servers": [
+      {"type": "local", "tag": "DefaultDNS"},
+      {"type": "udp", "tag": "PanelDNS", "server": "8.8.8.8"}
+    ],
+    "rules": [
+      {"domain_suffix": ["google.com", "steampowered.com"], "server": "PanelDNS"}
+    ]
+  },
+  "log": {"level": "info"},
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-1",
+      "listen": "0.0.0.0",
+      "listen_port": 443,
+      "users": []
+    }
+  ],
+  "outbounds": [
+    {"type": "direct", "tag": "DefaultOut"},
+    {"type": "block", "tag": "block"}
+  ],
+  "route": {
+    "default_domain_resolver": "DefaultDNS",
+    "final": "DefaultOut",
+    "rules": [
+      {"ip_cidr": ["114.5.1.4/32"], "outbound": "DefaultOut"},
+      {"ip_cidr": ["21.0.0.0/8"], "ip_is_private": true, "outbound": "block"},
+      {"port": [25, 109, 110, 137, 138, 139, 143, 443, 444, 445, 465, 587, 993, 994, 995, 2525, 5357], "outbound": "block"},
+      {"port": 443, "network": "udp", "outbound": "block"},
+      {"protocol": "bittorrent", "outbound": "block"}
+    ]
+  }
+}
