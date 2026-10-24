@@ -1,0 +1,22 @@
+log:
+  level: info
+
+inbounds:
+  - type: vless
+    tag: panel-vless
+    listen: 0.0.0.0
+    listen_port: 443
+    users: []
+
+services:
+  - type: xboard
+    tag: xboard-panel
+    api_host: https://panel.example.com
+    api_key: replace-with-server-token
+    node_id: 1
+    node_type: vless
+    servers:
+      vless: panel-vless
+    pull_interval: 60s
+    push_interval: 60s
+    timeout: 15s
