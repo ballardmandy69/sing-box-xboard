@@ -1,0 +1,22 @@
+## XBoard / XiaoV2Board compatibility configuration.
+## The panel token is an API credential; no local activation or identity check is used.
+
+DisableAccessLog: true
+IPLimit: 5
+RateLimit: 100
+ConnectionCleanupIntervalSec: 120
+HotUserCacheSec: 600
+
+Nodes:
+  - Type: UniProxy
+    UpdateInterval: "60s"
+    ApiConfig:
+      PanelTag: "vless-1"
+      ApiHost: "https://panel.example.com"
+      ApiKey: "replace-with-server-token"
+      NodeType: vless
+      NodeID: 1
+      Timeout: 15
+    CertConfig:
+      CertFile: "./zq.crt"
+      KeyFile: "./zq.key"

@@ -51,6 +51,7 @@ type node struct {
 	pullInterval  time.Duration
 	pushInterval  time.Duration
 	disableUpload bool
+	trafficFactor float64
 	access        sync.RWMutex
 	users         map[string]int64
 	userETag      string
@@ -146,6 +147,11 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			users:         make(map[string]int64),
 		})
 		node := s.nodes[len(s.nodes)-1]
+		trafficFactor := options.TrafficFactor
+		if trafficFactor <= 0 {
+			trafficFactor = 1
+		}
+		node.trafficFactor = trafficFactor
 		managed.SetTracker(node.traffic)
 	}
 	return s, nil
@@ -267,7 +273,10 @@ func (n *node) pushTraffic(ctx context.Context) error {
 		if n.disableUpload {
 			up = 0
 		}
-		payload[strconv.FormatInt(id, 10)] = [2]int64{up, user.DownlinkBytes}
+		payload[strconv.FormatInt(id, 10)] = [2]int64{
+			int64(float64(up) * n.trafficFactor),
+			int64(float64(user.DownlinkBytes) * n.trafficFactor),
+		}
 	}
 	if len(payload) == 0 {
 		return nil

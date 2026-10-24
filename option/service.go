@@ -25,6 +25,7 @@ type XBoardServiceOptions struct {
 	PushInterval         badoption.Duration                `json:"push_interval,omitempty"`
 	Timeout              badoption.Duration                `json:"timeout,omitempty"`
 	DisableUploadTraffic bool                              `json:"disable_upload_traffic,omitempty"`
+	TrafficFactor        float64                           `json:"traffic_factor,omitempty"`
 }
 
 type ServiceOptionsRegistry interface {

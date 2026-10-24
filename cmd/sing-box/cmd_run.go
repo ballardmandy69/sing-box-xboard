@@ -84,6 +84,8 @@ func decodeConfigContent(path string, content []byte) ([]byte, error) {
 	if err := yaml.Unmarshal(content, &value); err != nil {
 		return nil, err
 	}
+	value = normalizeLegacyConfigValue(value)
+	value = normalizeLegacyServerConfig(value)
 	return stdjson.Marshal(value)
 }
 

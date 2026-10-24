@@ -77,7 +77,7 @@ User=root
 Group=root
 WorkingDirectory=$INSTALL_DIR
 LimitNOFILE=999999
-ExecStart=$INSTALL_DIR/sing-box run -c $INSTALL_DIR/%i.json
+ExecStart=$INSTALL_DIR/sing-box run -c $INSTALL_DIR/%i.json -c $INSTALL_DIR/%i.yml
 Restart=always
 RestartSec=3
 
