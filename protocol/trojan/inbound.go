@@ -4,7 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
-	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -36,10 +36,8 @@ type Inbound struct {
 	router                   adapter.ConnectionRouterEx
 	logger                   log.ContextLogger
 	listener                 *listener.Listener
-	service                  *trojan.Service[int]
-	users                    []option.TrojanUser
-	usersAccess              sync.RWMutex
-	tracker                  adapter.SSMTracker
+	service                  *trojan.Service[inboundUserIdentity]
+	tracker                  atomic.Pointer[inboundTracker]
 	tlsConfig                tls.ServerConfig
 	fallbackAddr             M.Socksaddr
 	fallbackAddrTLSNextProto map[string]M.Socksaddr
@@ -47,12 +45,26 @@ type Inbound struct {
 	references               []string
 }
 
+// inboundUserIdentity keeps the authenticated identity independent of later user-list ordering.
+// @author lyt
+// @date 2026-10-29
+type inboundUserIdentity struct {
+	Name  string
+	Index int
+}
+
+// inboundTracker publishes a complete tracker reference to concurrent connections.
+// @author lyt
+// @date 2026-10-29
+type inboundTracker struct {
+	value adapter.SSMTracker
+}
+
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TrojanInboundOptions) (adapter.Inbound, error) {
 	inbound := &Inbound{
 		Adapter: inbound.NewAdapter(C.TypeTrojan, tag),
 		router:  router,
 		logger:  logger,
-		users:   options.Users,
 	}
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServerWithOptions(tls.ServerOptions{
@@ -94,9 +106,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 		fallbackHandler = adapter.NewUpstreamContextHandler(inbound.fallbackConnection, nil)
 	}
-	service := trojan.NewService[int](adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
-	err := service.UpdateUsers(common.MapIndexed(options.Users, func(index int, it option.TrojanUser) int {
-		return index
+	service := trojan.NewService[inboundUserIdentity](
+		adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
+	err := service.UpdateUsers(common.MapIndexed(options.Users, func(index int, it option.TrojanUser) inboundUserIdentity {
+		return inboundUserIdentity{Name: it.Name, Index: index}
 	}), common.Map(options.Users, func(it option.TrojanUser) string {
 		return it.Password
 	}))
@@ -190,12 +203,14 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 }
 
 func (h *Inbound) SetTracker(tracker adapter.SSMTracker) {
-	h.tracker = tracker
+	if tracker == nil {
+		h.tracker.Store(nil)
+	} else {
+		h.tracker.Store(&inboundTracker{value: tracker})
+	}
 }
 
 func (h *Inbound) UpdateUsers(users []string, uPSKs []string) error {
-	h.usersAccess.Lock()
-	defer h.usersAccess.Unlock()
 	updated := common.MapIndexed(users, func(index int, user string) option.TrojanUser {
 		password := user
 		if index < len(uPSKs) && uPSKs[index] != "" {
@@ -203,41 +218,29 @@ func (h *Inbound) UpdateUsers(users []string, uPSKs []string) error {
 		}
 		return option.TrojanUser{Name: user, Password: password}
 	})
-	err := h.service.UpdateUsers(common.MapIndexed(updated, func(index int, _ option.TrojanUser) int { return index }),
+	return h.service.UpdateUsers(common.MapIndexed(updated, func(index int, user option.TrojanUser) inboundUserIdentity {
+		return inboundUserIdentity{Name: user.Name, Index: index}
+	}),
 		common.Map(updated, func(user option.TrojanUser) string { return user.Password }))
-	if err != nil {
-		return err
-	}
-	h.users = updated
-	return nil
-}
-
-func (h *Inbound) userName(userIndex int) string {
-	h.usersAccess.RLock()
-	defer h.usersAccess.RUnlock()
-	if userIndex < 0 || userIndex >= len(h.users) {
-		return ""
-	}
-	return h.users[userIndex].Name
 }
 
 func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[inboundUserIdentity](ctx)
 	if !loaded {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.userName(userIndex)
+	user := identity.Name
 	if user == "" {
-		user = F.ToString(userIndex)
+		user = F.ToString(identity.Index)
 	} else {
 		metadata.User = user
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
-	if h.tracker != nil {
-		conn = h.tracker.TrackConnection(conn, metadata)
+	if tracker := h.tracker.Load(); tracker != nil {
+		conn = tracker.value.TrackConnection(conn, metadata)
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
@@ -245,20 +248,20 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[inboundUserIdentity](ctx)
 	if !loaded {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.userName(userIndex)
+	user := identity.Name
 	if user == "" {
-		user = F.ToString(userIndex)
+		user = F.ToString(identity.Index)
 	} else {
 		metadata.User = user
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
-	if h.tracker != nil {
-		conn = h.tracker.TrackPacketConnection(conn, metadata)
+	if tracker := h.tracker.Load(); tracker != nil {
+		conn = tracker.value.TrackPacketConnection(conn, metadata)
 	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }

@@ -4,7 +4,7 @@
 
 This tree includes the XBoard UniProxy service, YAML configuration support, and the custom TCP-only `anytls-native` protocol. It synchronizes panel users and reports traffic through managed inbounds.
 
-`anytls-native` now has a nyafw-style installer and `config.json` + `server.yml` layout, without product identity or activation arguments. The panel API token is still required. Installation generates the server key locally and preserves existing configurations.
+The nyafw-style installer includes standard Trojan, standard AnyTLS, and `anytls-native` templates using `config.json` + `server.yml`, without product identity or activation arguments. The panel API token is still required. Installation preserves existing configurations.
 
 The first matching native release is `v1.14.3-xboard-native.1`. As root on a Linux systemd server:
 
@@ -14,9 +14,12 @@ VERSION=v1.14.3-xboard-native.1 bash <(curl -fLSs https://raw.githubusercontent.
 
 Then edit `/opt/sing-box-xboard/server.yml` and start `xboard-sb@server.service`. This is an experimental custom protocol; existing public AnyTLS clients and panel subscriptions do not automatically become native clients.
 
+For a standard protocol, set `PROTOCOL=trojan` or `PROTOCOL=anytls` and provide existing certificate paths in `TLS_CERT_FILE` and `TLS_KEY_FILE`. Standard entries keep their original wire formats; the default remains `anytls-native`. All three template pairs are installed under `examples/`.
+
 - [Installation, panel configuration, and systemd commands](docs/xboard-config.md)
 - [Native protocol and client configuration](docs/anytls-native.md)
 - Native templates: [config.anytls-native.json](config.anytls-native.json), [server.anytls-native.yml](server.anytls-native.yml)
+- Standard templates: [Trojan](config.trojan.json), [AnyTLS](config.anytls.json)
 
 The upstream-style [xboard.example.yaml](xboard.example.yaml) and existing protocol examples remain available.
 

@@ -1,0 +1,14 @@
+# 原版 AnyTLS，使用标准 TLS 和原版 padding。
+DisableAccessLog: false
+
+Nodes:
+  - Type: UniProxy
+    UpdateInterval: "60s"
+    ApiConfig:
+      PanelTag: "anytls-1"
+      ApiHost: "https://panel.example.com"
+      ApiKey: "replace-with-server-token"
+      # 填面板 API 中该节点的实际类型。
+      NodeType: anytls
+      NodeID: 1
+      Timeout: 15

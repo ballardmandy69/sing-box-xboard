@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the native backend and nyafw-style shared/independent service templates.
+# Install the backend and nyafw-style shared/independent service templates.
 # @author lyt
 # @date 2026-10-29
 set -euo pipefail
@@ -12,6 +12,7 @@ SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SERVICE_PREFIX="${SERVICE_PREFIX-xboard-}"
 INSTANCE="${INSTANCE:-server}"
 RELEASE_DIR="${RELEASE_DIR:-}"
+PROTOCOL="${PROTOCOL:-anytls-native}"
 
 info() { printf '%s\n' "$*"; }
 error() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -32,6 +33,7 @@ valid_directory "$SYSTEMD_DIR" || error "SYSTEMD_DIR must be a non-root absolute
 [[ "$INSTANCE" =~ ^[A-Za-z0-9_-]+$ ]] || error "invalid INSTANCE"
 [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || error "invalid REPOSITORY"
 [[ "$VERSION" =~ ^[A-Za-z0-9_.-]+$ ]] || error "invalid VERSION"
+case "$PROTOCOL" in anytls-native|anytls|trojan) ;; *) error "PROTOCOL must be anytls-native, anytls or trojan" ;; esac
 for command_name in curl tar sha256sum install mktemp sed grep cp mv systemctl; do
   command -v "$command_name" >/dev/null 2>&1 || error "$command_name is required"
 done
@@ -97,7 +99,9 @@ tar -tzf "$TMP_DIR/$ASSET" > "$TMP_DIR/members"
 declare -A seen_members=()
 while IFS= read -r member; do
   case "$member" in
-    sing-box|config.anytls-native.json|server.anytls-native.yml|install.sh|sb-auto.sh|USAGE.md|anytls-native.md|LICENSE|ANYTLS-LICENSE) ;;
+    sing-box|install.sh|sb-auto.sh|USAGE.md|anytls-native.md|LICENSE|ANYTLS-LICENSE) ;;
+    config.anytls-native.json|server.anytls-native.yml|config.anytls.json|server.anytls.yml) ;;
+    config.trojan.json|server.trojan.yml) ;;
     *) error "unexpected package member: $member" ;;
   esac
   [ -z "${seen_members[$member]+set}" ] || error "duplicate package member: $member"
@@ -109,42 +113,63 @@ while IFS= read -r member_type; do
 done < "$TMP_DIR/member-types"
 mkdir "$TMP_DIR/package" "$TMP_DIR/config"
 tar -xzf "$TMP_DIR/$ASSET" --no-same-owner --no-same-permissions -C "$TMP_DIR/package"
-for name in sing-box config.anytls-native.json server.anytls-native.yml install.sh sb-auto.sh USAGE.md anytls-native.md LICENSE ANYTLS-LICENSE; do
+package_files=(sing-box install.sh sb-auto.sh USAGE.md anytls-native.md LICENSE ANYTLS-LICENSE)
+for protocol_name in anytls-native anytls trojan; do
+  package_files+=("config.$protocol_name.json" "server.$protocol_name.yml")
+done
+for name in "${package_files[@]}"; do
   [ -s "$TMP_DIR/package/$name" ] && [ ! -L "$TMP_DIR/package/$name" ] ||
-    error "package lacks regular file $name; a release containing anytls-native is required"
+    error "package lacks regular file $name; a release containing all three protocol templates is required"
 done
 chmod 0755 "$TMP_DIR/package/sing-box"
-if ! key_pair="$("$TMP_DIR/package/sing-box" generate anytls-native-keypair)"; then
-  error "this binary does not support anytls-native; select a newer release"
-fi
-private_key="$(printf '%s\n' "$key_pair" | sed -n 's/^PrivateKey: //p')"
-public_key="$(printf '%s\n' "$key_pair" | sed -n 's/^PublicKey: //p')"
-[[ "$private_key" =~ ^[A-Za-z0-9_-]{43}$ && "$public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] ||
-  error "invalid native key generator output"
-unset key_pair
 
 new_config=false
 if [ -e "$INSTALL_DIR/config.json" ]; then
   [ -f "$INSTALL_DIR/config.json" ] && [ ! -L "$INSTALL_DIR/config.json" ] || error "config.json must be a regular file"
+  [ -e "$INSTALL_DIR/$INSTANCE.yml" ] ||
+    error "existing config.json has no matching $INSTANCE.yml; supply its matching panel YAML before upgrading"
   cp -- "$INSTALL_DIR/config.json" "$TMP_DIR/config/config.json"
 else
-  grep -q '__SERVER_PRIVATE_KEY__' "$TMP_DIR/package/config.anytls-native.json" || error "native template lacks private key placeholder"
-  native_template="$(< "$TMP_DIR/package/config.anytls-native.json")"
-  printf '%s\n' "${native_template//__SERVER_PRIVATE_KEY__/$private_key}" > "$TMP_DIR/config/config.json"
-  unset native_template
+  [ ! -e "$INSTALL_DIR/$INSTANCE.yml" ] ||
+    error "existing $INSTANCE.yml has no matching config.json; supply its matching JSON before installing"
+  config_template="$(< "$TMP_DIR/package/config.$PROTOCOL.json")"
+  if [ "$PROTOCOL" = anytls-native ]; then
+    if ! key_pair="$("$TMP_DIR/package/sing-box" generate anytls-native-keypair)"; then
+      error "this binary does not support anytls-native; select a newer release"
+    fi
+    private_key="$(printf '%s\n' "$key_pair" | sed -n 's/^PrivateKey: //p')"
+    public_key="$(printf '%s\n' "$key_pair" | sed -n 's/^PublicKey: //p')"
+    [[ "$private_key" =~ ^[A-Za-z0-9_-]{43}$ && "$public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] ||
+      error "invalid native key generator output"
+    [[ "$config_template" = *'__SERVER_PRIVATE_KEY__'* ]] || error "native template lacks private key placeholder"
+    config_template="${config_template//__SERVER_PRIVATE_KEY__/$private_key}"
+    unset key_pair private_key
+  else
+    valid_directory "${TLS_CERT_FILE:-}" && [ -f "$TLS_CERT_FILE" ] && [ -s "$TLS_CERT_FILE" ] ||
+      error "TLS_CERT_FILE must reference an existing nonempty certificate using an absolute ASCII path without spaces"
+    valid_directory "${TLS_KEY_FILE:-}" && [ -f "$TLS_KEY_FILE" ] && [ -s "$TLS_KEY_FILE" ] ||
+      error "TLS_KEY_FILE must reference an existing nonempty private key using an absolute ASCII path without spaces"
+    [[ "$config_template" = *'__TLS_CERT_FILE__'* && "$config_template" = *'__TLS_KEY_FILE__'* ]] ||
+      error "TLS protocol template lacks certificate placeholders"
+    config_template="${config_template//__TLS_CERT_FILE__/$TLS_CERT_FILE}"
+    config_template="${config_template//__TLS_KEY_FILE__/$TLS_KEY_FILE}"
+  fi
+  printf '%s\n' "$config_template" > "$TMP_DIR/config/config.json"
+  unset config_template
   new_config=true
 fi
-unset private_key
 if [ -e "$INSTALL_DIR/$INSTANCE.yml" ]; then
-  [ -f "$INSTALL_DIR/$INSTANCE.yml" ] && [ ! -L "$INSTALL_DIR/$INSTANCE.yml" ] || error "instance YAML must be a regular file"
+  [ -f "$INSTALL_DIR/$INSTANCE.yml" ] && [ ! -L "$INSTALL_DIR/$INSTANCE.yml" ] ||
+    error "instance YAML must be a regular file"
   cp -- "$INSTALL_DIR/$INSTANCE.yml" "$TMP_DIR/config/$INSTANCE.yml"
 else
-  cp -- "$TMP_DIR/package/server.anytls-native.yml" "$TMP_DIR/config/$INSTANCE.yml"
+  cp -- "$TMP_DIR/package/server.$PROTOCOL.yml" "$TMP_DIR/config/$INSTANCE.yml"
 fi
 check_directory="$TMP_DIR/config"
 [ ! -d "$INSTALL_DIR" ] || check_directory="$INSTALL_DIR"
 (cd "$check_directory" && "$TMP_DIR/package/sing-box" check \
-  -c "$TMP_DIR/config/config.json" -c "$TMP_DIR/config/$INSTANCE.yml") || error "configuration check failed; installation was not changed"
+  -c "$TMP_DIR/config/config.json" -c "$TMP_DIR/config/$INSTANCE.yml") ||
+  error "configuration check failed; installation was not changed"
 
 for kind in sb sbc; do
   json_name=config.json
@@ -174,11 +199,16 @@ install_targets=("$INSTALL_DIR/sing-box" "$INSTALL_DIR/install.sh" "$INSTALL_DIR
   "$INSTALL_DIR/USAGE.md" "$INSTALL_DIR/anytls-native.md" "$INSTALL_DIR/LICENSE" "$INSTALL_DIR/ANYTLS-LICENSE"
   "$SYSTEMD_DIR/${SERVICE_PREFIX}sb@.service" "$SYSTEMD_DIR/${SERVICE_PREFIX}sbc@.service")
 if [ "$new_config" = true ]; then
-  install_targets+=("$INSTALL_DIR/config.json" "$INSTALL_DIR/server-public-key.txt")
+  install_targets+=("$INSTALL_DIR/config.json")
+  [ "$PROTOCOL" != anytls-native ] || install_targets+=("$INSTALL_DIR/server-public-key.txt")
 fi
 if [ ! -e "$INSTALL_DIR/$INSTANCE.yml" ]; then
   install_targets+=("$INSTALL_DIR/$INSTANCE.yml")
 fi
+for protocol_name in anytls-native anytls trojan; do
+  install_targets+=("$INSTALL_DIR/examples/config.$protocol_name.json"
+    "$INSTALL_DIR/examples/server.$protocol_name.yml")
+done
 mkdir "$TMP_DIR/previous"
 for index in "${!install_targets[@]}"; do
   target="${install_targets[$index]}"
@@ -188,11 +218,13 @@ for index in "${!install_targets[@]}"; do
   fi
 done
 install_started=true
-mkdir -p -- "$INSTALL_DIR" "$SYSTEMD_DIR"
+mkdir -p -- "$INSTALL_DIR/examples" "$SYSTEMD_DIR"
 if [ "$new_config" = true ]; then
   atomic_install 0600 "$TMP_DIR/config/config.json" "$INSTALL_DIR/config.json"
-  printf '%s\n' "$public_key" > "$TMP_DIR/server-public-key.txt"
-  atomic_install 0644 "$TMP_DIR/server-public-key.txt" "$INSTALL_DIR/server-public-key.txt"
+  if [ "$PROTOCOL" = anytls-native ]; then
+    printf '%s\n' "$public_key" > "$TMP_DIR/server-public-key.txt"
+    atomic_install 0644 "$TMP_DIR/server-public-key.txt" "$INSTALL_DIR/server-public-key.txt"
+  fi
 fi
 [ -e "$INSTALL_DIR/$INSTANCE.yml" ] || atomic_install 0600 "$TMP_DIR/config/$INSTANCE.yml" "$INSTALL_DIR/$INSTANCE.yml"
 for name in install.sh sb-auto.sh; do
@@ -200,6 +232,11 @@ for name in install.sh sb-auto.sh; do
 done
 for name in USAGE.md anytls-native.md LICENSE ANYTLS-LICENSE; do
   atomic_install 0644 "$TMP_DIR/package/$name" "$INSTALL_DIR/$name"
+done
+for protocol_name in anytls-native anytls trojan; do
+  for name in "config.$protocol_name.json" "server.$protocol_name.yml"; do
+    atomic_install 0644 "$TMP_DIR/package/$name" "$INSTALL_DIR/examples/$name"
+  done
 done
 for kind in sb sbc; do
   atomic_install 0644 "$TMP_DIR/${SERVICE_PREFIX}${kind}@.service" "$SYSTEMD_DIR/${SERVICE_PREFIX}${kind}@.service"
@@ -211,5 +248,7 @@ info "installed sing-box XBoard $VERSION ($ARCH) in $INSTALL_DIR"
 info "existing configuration and keys were preserved; services were not started or restarted"
 info "edit $INSTALL_DIR/$INSTANCE.yml with your panel URL, API key and node ID"
 info "review $INSTALL_DIR/config.json, then run: systemctl enable --now ${SERVICE_PREFIX}sb@${INSTANCE}.service"
-[ ! -f "$INSTALL_DIR/server-public-key.txt" ] || info "client server_public_key file: $INSTALL_DIR/server-public-key.txt"
+if [ "$new_config" = true ] && [ "$PROTOCOL" = anytls-native ]; then
+  info "client server_public_key file: $INSTALL_DIR/server-public-key.txt"
+fi
 info "no PRODUCT, identity UUID or activation verification is required"

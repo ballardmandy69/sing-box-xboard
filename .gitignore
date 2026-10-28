@@ -2,6 +2,8 @@
 /vendor/
 /*.json
 !/config.anytls-native.json
+!/config.anytls.json
+!/config.trojan.json
 /*.srs
 /*.db
 /site/

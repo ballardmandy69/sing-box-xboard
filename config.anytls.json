@@ -1,0 +1,24 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": { "servers": [{ "type": "local", "tag": "local-dns" }] },
+  "inbounds": [
+    {
+      "type": "anytls",
+      "tag": "anytls-1",
+      "listen": "0.0.0.0",
+      "listen_port": 443,
+      "users": [],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "__TLS_CERT_FILE__",
+        "key_path": "__TLS_KEY_FILE__"
+      }
+    }
+  ],
+  "outbounds": [{ "type": "direct", "tag": "direct" }],
+  "route": {
+    "default_domain_resolver": "local-dns",
+    "final": "direct",
+    "rules": [{ "network": "udp", "action": "reject" }]
+  }
+}

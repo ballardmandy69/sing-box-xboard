@@ -1,0 +1,13 @@
+# 原版 Trojan，TLS 证书在 config.json 中配置。
+DisableAccessLog: false
+
+Nodes:
+  - Type: UniProxy
+    UpdateInterval: "60s"
+    ApiConfig:
+      PanelTag: "trojan-1"
+      ApiHost: "https://panel.example.com"
+      ApiKey: "replace-with-server-token"
+      NodeType: trojan
+      NodeID: 1
+      Timeout: 15
