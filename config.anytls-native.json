@@ -1,0 +1,30 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      { "type": "local", "tag": "local-dns" }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "anytls-native",
+      "tag": "native-1",
+      "listen": "0.0.0.0",
+      "listen_port": 443,
+      "private_key": "__SERVER_PRIVATE_KEY__",
+      "users": [],
+      "handshake_timeout": "10s",
+      "max_pending_handshakes": 128
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "default_domain_resolver": "local-dns",
+    "final": "direct"
+  }
+}

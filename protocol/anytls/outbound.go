@@ -85,6 +85,14 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		DialOut:                  outbound.dialOut,
 		Logger:                   logger,
 	}
+	if options.SessionHealth != nil {
+		outbound.clientOptions.SessionHealth = &anytls.SessionHealthOptions{
+			Enabled:         options.SessionHealth.Enabled,
+			IdleThreshold:   options.SessionHealth.IdleThreshold.Build(),
+			Timeout:         options.SessionHealth.Timeout.Build(),
+			MaxIdleSessions: options.SessionHealth.MaxIdleSessions,
+		}
+	}
 	outbound.clientMetadata = options.ClientMetadata
 	return outbound, nil
 }

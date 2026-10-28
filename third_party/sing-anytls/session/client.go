@@ -37,10 +37,35 @@ type Client struct {
 
 	logger          logger.Logger
 	enhancedPadding bool
+	health          HealthOptions
+	disablePadding  bool
 }
 
 func NewClient(ctx context.Context, logger logger.Logger, dialOut util.DialOutFunc,
 	_padding *atomic.TypedValue[*padding.PaddingFactory], idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int, enhancedPadding ...bool,
+) *Client {
+	return newClient(ctx, logger, dialOut, _padding, idleSessionCheckInterval,
+		idleSessionTimeout, minIdleSession, HealthOptions{}, enhancedPadding...)
+}
+
+func NewClientWithHealth(ctx context.Context, logger logger.Logger, dialOut util.DialOutFunc,
+	_padding *atomic.TypedValue[*padding.PaddingFactory], idleSessionCheckInterval, idleSessionTimeout time.Duration,
+	minIdleSession int, health HealthOptions, enhancedPadding ...bool,
+) (*Client, error) {
+	if minIdleSession < 0 || health.MaxIdleSessions < 0 || health.IdleThreshold < 0 || health.Timeout < 0 {
+		return nil, fmt.Errorf("session health limits and durations must not be negative")
+	}
+	health = health.normalized()
+	if health.Enabled && minIdleSession > health.MaxIdleSessions {
+		return nil, fmt.Errorf("min idle sessions must not exceed max idle sessions")
+	}
+	return newClient(ctx, logger, dialOut, _padding, idleSessionCheckInterval,
+		idleSessionTimeout, minIdleSession, health, enhancedPadding...), nil
+}
+
+func newClient(ctx context.Context, logger logger.Logger, dialOut util.DialOutFunc,
+	_padding *atomic.TypedValue[*padding.PaddingFactory], idleSessionCheckInterval, idleSessionTimeout time.Duration,
+	minIdleSession int, health HealthOptions, enhancedPadding ...bool,
 ) *Client {
 	c := &Client{
 		sessions:           make(map[uint64]*Session),
@@ -50,6 +75,8 @@ func NewClient(ctx context.Context, logger logger.Logger, dialOut util.DialOutFu
 		minIdleSession:     minIdleSession,
 		logger:             logger,
 		enhancedPadding:    len(enhancedPadding) > 0 && enhancedPadding[0],
+		health:             health,
+		disablePadding:     len(enhancedPadding) > 1 && enhancedPadding[1],
 	}
 	if idleSessionCheckInterval <= time.Second*5 {
 		idleSessionCheckInterval = time.Second * 30
@@ -60,13 +87,14 @@ func NewClient(ctx context.Context, logger logger.Logger, dialOut util.DialOutFu
 	c.die, c.dieCancel = context.WithCancel(ctx)
 	c.idleSession = skiplist.NewSkipList[uint64, *Session]()
 	go func() {
+		ticker := time.NewTicker(idleSessionCheckInterval)
+		defer ticker.Stop()
 		for {
-			time.Sleep(idleSessionCheckInterval)
-			c.idleCleanup()
 			select {
 			case <-c.die.Done():
 				return
-			default:
+			case <-ticker.C:
+				c.idleCleanup()
 			}
 		}
 	}()
@@ -74,6 +102,10 @@ func NewClient(ctx context.Context, logger logger.Logger, dialOut util.DialOutFu
 }
 
 func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
+	ctx, cancelDial := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.die, cancelDial)
+	defer stop()
+	defer cancelDial()
 	select {
 	case <-c.die.Done():
 		return nil, io.ErrClosedPipe
@@ -85,35 +117,76 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	var err error
 
 	session = c.getIdleSession()
+	for session != nil && session.IsClosed() {
+		session = c.getIdleSession()
+	}
+	if session != nil && c.health.Enabled && time.Since(session.idleSince) >= c.health.IdleThreshold {
+		probeCtx, cancel := context.WithTimeout(ctx, c.health.Timeout)
+		err = session.checkHealth(probeCtx)
+		cancel()
+		if err != nil {
+			c.logger.Debug("AnyTLS idle session health check failed; replacing connection: ", err)
+			session.Close()
+			session = nil
+		}
+	}
+	if err = ctx.Err(); err != nil {
+		if session != nil {
+			session.Close()
+		}
+		return nil, err
+	}
 	if session == nil {
 		session, err = c.createSession(ctx)
 	}
 	if session == nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
+	closeDone := make(chan struct{})
+	stopClose := context.AfterFunc(ctx, func() {
+		session.Close()
+		close(closeDone)
+	})
 	stream, err = session.OpenStream()
+	if !stopClose() {
+		<-closeDone
+	}
+	if ctx.Err() != nil {
+		session.Close()
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		session.Close()
 		return nil, fmt.Errorf("failed to create stream: %w", err)
 	}
 
-	stream.dieHook = func() {
+	stream.setDieHook(func() {
 		// If Session is not closed, put this Stream to pool
 		if !session.IsClosed() {
-			select {
-			case <-c.die.Done():
-				// Now client has been closed
-				go session.Close()
-			default:
-				c.idleSessionLock.Lock()
-				session.idleSince = time.Now()
-				c.idleSession.Insert(math.MaxUint64-session.seq, session)
-				c.idleSessionLock.Unlock()
-			}
+			c.returnIdleSession(session)
 		}
-	}
+	})
 
 	return stream, nil
+}
+
+func (c *Client) returnIdleSession(session *Session) {
+	c.idleSessionLock.Lock()
+	select {
+	case <-c.die.Done():
+		c.idleSessionLock.Unlock()
+		session.Close()
+		return
+	default:
+	}
+	if session.IsClosed() || (c.health.Enabled && c.idleSession.Len() >= c.health.MaxIdleSessions) {
+		c.idleSessionLock.Unlock()
+		session.Close()
+		return
+	}
+	session.idleSince = time.Now()
+	c.idleSession.Insert(math.MaxUint64-session.seq, session)
+	c.idleSessionLock.Unlock()
 }
 
 func (c *Client) getIdleSession() (idle *Session) {
@@ -132,8 +205,12 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = ctx.Err(); err != nil {
+		underlying.Close()
+		return nil, err
+	}
 
-	session := NewClientSession(underlying, c.padding, c.logger, c.enhancedPadding)
+	session := NewClientSession(underlying, c.padding, c.logger, c.enhancedPadding, c.disablePadding)
 	session.seq = c.sessionCounter.Add(1)
 	session.dieHook = func() {
 		c.idleSessionLock.Lock()
@@ -146,6 +223,13 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	}
 
 	c.sessionsLock.Lock()
+	select {
+	case <-c.die.Done():
+		c.sessionsLock.Unlock()
+		underlying.Close()
+		return nil, io.ErrClosedPipe
+	default:
+	}
 	c.sessions[session.seq] = session
 	c.sessionsLock.Unlock()
 
@@ -192,7 +276,10 @@ func (c *Client) idleCleanupExpTime(expTime time.Time) {
 		}
 
 		if activeCount < c.minIdleSession {
-			session.idleSince = time.Now()
+			// Retention is not activity: health probes must see the real idle age.
+			if !c.health.Enabled {
+				session.idleSince = time.Now()
+			}
 			activeCount++
 			continue
 		}

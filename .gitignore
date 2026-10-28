@@ -1,6 +1,7 @@
 /.idea/
 /vendor/
 /*.json
+!/config.anytls-native.json
 /*.srs
 /*.db
 /site/

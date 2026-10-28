@@ -6,6 +6,16 @@ on:
     paths:
       - 'third_party/sing-anytls/**'
       - 'protocol/anytls/**'
+      - 'protocol/anytlsnative/**'
+      - 'transport/anytlsnative/**'
+      - 'cmd/sing-box/**'
+      - 'option/anytls_native.go'
+      - 'install.sh'
+      - 'sb-auto.sh'
+      - 'test/install_test.sh'
+      - 'config.anytls-native.json'
+      - 'server.anytls-native.yml'
+      - 'release/package-xboard.sh'
       - 'option/anytls.go'
       - 'go.mod'
       - '.github/workflows/anytls-compat.yml'
@@ -13,6 +23,16 @@ on:
     paths:
       - 'third_party/sing-anytls/**'
       - 'protocol/anytls/**'
+      - 'protocol/anytlsnative/**'
+      - 'transport/anytlsnative/**'
+      - 'cmd/sing-box/**'
+      - 'option/anytls_native.go'
+      - 'install.sh'
+      - 'sb-auto.sh'
+      - 'test/install_test.sh'
+      - 'config.anytls-native.json'
+      - 'server.anytls-native.yml'
+      - 'release/package-xboard.sh'
       - 'option/anytls.go'
       - 'go.mod'
       - '.github/workflows/anytls-compat.yml'
@@ -35,5 +55,9 @@ jobs:
         run: go test -race ./... -count=1 -timeout=180s
       - name: sing-box integration
         run: go test ./protocol/anytls ./option ./cmd/sing-box
+      - name: Native transport, panel and revocation races
+        run: go test -race ./transport/anytlsnative ./protocol/anytlsnative ./service/xboard
       - name: Build client and server
-        run: go build ./cmd/sing-box
+        run: go build -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+      - name: Install and update deployment
+        run: SING_BOX_BINARY="$RUNNER_TEMP/sing-box" bash test/install_test.sh

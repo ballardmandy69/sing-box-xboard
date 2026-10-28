@@ -1,0 +1,15 @@
+# 安装器生成 server.yml；保留重要的面板同步及运行错误日志。
+DisableAccessLog: false
+
+Nodes:
+  - Type: UniProxy
+    UpdateInterval: "60s"
+    ApiConfig:
+      # 必须与 config.json 的入站 tag 一致。
+      PanelTag: "native-1"
+      ApiHost: "https://panel.example.com"
+      ApiKey: "replace-with-server-token"
+      # 这是面板 API 中该节点的实际类型，不是本地 anytls-native 协议名。
+      NodeType: anytls
+      NodeID: 1
+      Timeout: 15

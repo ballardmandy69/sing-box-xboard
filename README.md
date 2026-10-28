@@ -2,17 +2,23 @@
 
 ## XBoard / XiaoV2Board
 
-This tree includes the XBoard UniProxy service and YAML configuration support. It synchronizes users and reports traffic for VLESS, VMess, Trojan, Shadowsocks, Hysteria2 and TUIC inbounds.
+This tree includes the XBoard UniProxy service, YAML configuration support, and the custom TCP-only `anytls-native` protocol. It synchronizes panel users and reports traffic through managed inbounds.
 
-Install the latest Linux release with:
+`anytls-native` now has a nyafw-style installer and `config.json` + `server.yml` layout, without product identity or activation arguments. The panel API token is still required. Installation generates the server key locally and preserves existing configurations.
+
+The first matching native release is `v1.14.3-xboard-native.1`. As root on a Linux systemd server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ballardmandy69/sing-box-xboard/main/install.sh | sudo bash
+VERSION=v1.14.3-xboard-native.1 bash <(curl -fLSs https://raw.githubusercontent.com/ballardmandy69/sing-box-xboard/v1.14.3-xboard-native.1/install.sh)
 ```
 
-The installer uses `/opt/sing-box-xboard`, creates `xboard-sb@.service` for shared configurations and `xboard-sbc@.service` for independent configurations, and performs no local identity or activation verification. The XBoard `api_key` remains required as the panel API credential.
+Then edit `/opt/sing-box-xboard/server.yml` and start `xboard-sb@server.service`. This is an experimental custom protocol; existing public AnyTLS clients and panel subscriptions do not automatically become native clients.
 
-Example configuration: [xboard.example.yaml](xboard.example.yaml).
+- [Installation, panel configuration, and systemd commands](docs/xboard-config.md)
+- [Native protocol and client configuration](docs/anytls-native.md)
+- Native templates: [config.anytls-native.json](config.anytls-native.json), [server.anytls-native.yml](server.anytls-native.yml)
+
+The upstream-style [xboard.example.yaml](xboard.example.yaml) and existing protocol examples remain available.
 
 The universal proxy platform.
 

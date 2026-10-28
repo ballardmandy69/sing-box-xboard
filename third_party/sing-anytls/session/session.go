@@ -2,11 +2,9 @@ package session
 
 import (
 	"crypto/md5"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"slices"
 	"strconv"
@@ -59,16 +57,23 @@ type Session struct {
 	enhancedReady        stdatomic.Bool
 	enhancedDataBytes    uint64
 	enhancedPaddingBytes uint64
+	enhancedMode         stdatomic.Uint32
+	shaper               shapingState
+	health               sessionHealth
+	controlPending       stdatomic.Int32
+	controlCond          *sync.Cond
+	disablePadding       bool
 }
 
 func NewClientSession(conn net.Conn, _padding *atomic.TypedValue[*padding.PaddingFactory], logger logger.Logger, enhancedPadding ...bool) *Session {
 	s := &Session{
 		conn:            conn,
 		isClient:        true,
-		sendPadding:     true,
+		sendPadding:     !(len(enhancedPadding) > 1 && enhancedPadding[1]),
 		padding:         _padding,
 		logger:          logger,
-		enhancedPadding: len(enhancedPadding) > 0 && enhancedPadding[0],
+		enhancedPadding: len(enhancedPadding) > 0 && enhancedPadding[0] && !(len(enhancedPadding) > 1 && enhancedPadding[1]),
+		disablePadding:  len(enhancedPadding) > 1 && enhancedPadding[1],
 	}
 	s.die = make(chan struct{})
 	s.streams = make(map[uint32]*Stream)
@@ -81,7 +86,8 @@ func NewServerSession(conn net.Conn, onNewStream func(stream *Stream), _padding 
 		onNewStream:     onNewStream,
 		padding:         _padding,
 		logger:          logger,
-		enhancedPadding: len(enhancedPadding) > 0 && enhancedPadding[0],
+		enhancedPadding: len(enhancedPadding) > 0 && enhancedPadding[0] && !(len(enhancedPadding) > 1 && enhancedPadding[1]),
+		disablePadding:  len(enhancedPadding) > 1 && enhancedPadding[1],
 	}
 	s.die = make(chan struct{})
 	s.streams = make(map[uint32]*Stream)
@@ -100,7 +106,7 @@ func (s *Session) Run() {
 		"padding-md5": s.padding.Load().Md5,
 	}
 	if s.enhancedPadding {
-		settings[enhancedPaddingSetting] = enhancedPaddingVersion
+		settings[enhancedPaddingSetting] = enhancedShapingVersion
 	}
 	f := newFrame(cmdSettings, 0)
 	f.data = settings.ToBytes()
@@ -152,8 +158,18 @@ func (s *Session) OpenStream() (*Stream, error) {
 
 	sid := s.streamId.Add(1)
 	stream := newStream(sid, s)
+	s.streamLock.Lock()
+	select {
+	case <-s.die:
+		s.streamLock.Unlock()
+		stream.closeLocally()
+		return nil, io.ErrClosedPipe
+	default:
+		s.streams[sid] = stream
+	}
+	s.streamLock.Unlock()
 
-	if sid >= 2 && s.peerVersion >= 2 {
+	if sid >= 2 && s.healthPeerVersion() >= 2 {
 		s.synDoneLock.Lock()
 		if s.synDone != nil {
 			s.synDone()
@@ -168,17 +184,20 @@ func (s *Session) OpenStream() (*Stream, error) {
 		return nil, err
 	}
 
+	s.connLock.Lock()
 	s.buffering = false // proxy Write it's SocksAddr to flush the buffer
+	s.connLock.Unlock()
 
-	s.streamLock.Lock()
-	defer s.streamLock.Unlock()
-	select {
-	case <-s.die:
+	if s.IsClosed() {
 		return nil, io.ErrClosedPipe
-	default:
-		s.streams[sid] = stream
-		return stream, nil
 	}
+	if closeErr := stream.closeError(); closeErr != nil {
+		s.streamLock.Lock()
+		delete(s.streams, sid)
+		s.streamLock.Unlock()
+		return nil, closeErr
+	}
+	return stream, nil
 }
 
 func (s *Session) recvLoop() error {
@@ -286,7 +305,7 @@ func (s *Session) recvLoop() error {
 						receivedSettingsFromClient = true
 						m := util.StringMapFromBytes(buffer)
 						paddingF := s.padding.Load()
-						if m["padding-md5"] != paddingF.Md5 {
+						if !s.disablePadding && m["padding-md5"] != paddingF.Md5 {
 							f := newFrame(cmdUpdatePaddingScheme, 0)
 							f.data = paddingF.RawScheme
 							_, err = s.writeControlFrame(f)
@@ -298,14 +317,15 @@ func (s *Session) recvLoop() error {
 						// check client's version
 						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
 							s.peerVersion = byte(v)
+							s.markHealthPeerVersion(s.peerVersion)
 							// send cmdServerSettings
 							f := newFrame(cmdServerSettings, 0)
 							serverSettings := util.StringMap{
 								"v": "2",
 							}
-							enhanced := s.enhancedPadding && m[enhancedPaddingSetting] == enhancedPaddingVersion
-							if enhanced {
-								serverSettings[enhancedPaddingSetting] = enhancedPaddingVersion
+							mode := s.acceptPaddingVersion(m[enhancedPaddingSetting])
+							if mode != "" {
+								serverSettings[enhancedPaddingSetting] = mode
 							}
 							f.data = serverSettings.ToBytes()
 							_, err = s.writeControlFrame(f)
@@ -313,8 +333,8 @@ func (s *Session) recvLoop() error {
 								buf.Put(buffer)
 								return err
 							}
-							if enhanced {
-								s.enableEnhancedPadding()
+							if mode != "" {
+								s.enableEnhancedPadding(mode)
 							}
 						}
 					}
@@ -340,7 +360,7 @@ func (s *Session) recvLoop() error {
 					if _, err := io.ReadFull(s.conn, rawScheme); err != nil {
 						return err
 					}
-					if s.isClient {
+					if s.isClient && !s.disablePadding {
 						if padding.UpdatePaddingScheme(rawScheme, s.padding) {
 							s.logger.Debug(fmt.Sprintf("[Update padding succeed] %x\n", md5.Sum(rawScheme)))
 						} else {
@@ -353,8 +373,7 @@ func (s *Session) recvLoop() error {
 					return err
 				}
 			case cmdHeartResponse:
-				// Active keepalive checking is not implemented yet
-				break
+				s.handleHealthResponse(sid)
 			case cmdServerSettings:
 				if hdr.Length() > 0 {
 					buffer := buf.Get(int(hdr.Length()))
@@ -367,8 +386,9 @@ func (s *Session) recvLoop() error {
 						m := util.StringMapFromBytes(buffer)
 						if v, err := strconv.Atoi(m["v"]); err == nil {
 							s.peerVersion = byte(v)
-							if v >= 2 && s.enhancedPadding && m[enhancedPaddingSetting] == enhancedPaddingVersion {
-								s.enableEnhancedPadding()
+							s.markHealthPeerVersion(s.peerVersion)
+							if mode := s.acceptPaddingVersion(m[enhancedPaddingSetting]); v >= 2 && mode != "" {
+								s.enableEnhancedPadding(mode)
 							}
 						}
 					}
@@ -395,6 +415,26 @@ func (s *Session) streamClosed(sid uint32) error {
 }
 
 func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
+	limit := 65535
+	// A complete frame fits the existing uint16 payload length. Control frames
+	// can take priority between frames without adding enhancement-only headers.
+	if len(data) <= limit {
+		return s.writeOneDataFrame(sid, data)
+	}
+	var written int
+	for len(data) > 0 {
+		size := min(len(data), limit)
+		n, err := s.writeOneDataFrame(sid, data[:size])
+		written += n
+		if err != nil {
+			return written, err
+		}
+		data = data[size:]
+	}
+	return written, nil
+}
+
+func (s *Session) writeOneDataFrame(sid uint32, data []byte) (int, error) {
 	dataLen := len(data)
 
 	buffer := buf.NewSize(dataLen + headerOverHeadSize)
@@ -405,6 +445,7 @@ func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
 	_, err := s.writeConn(buffer.Bytes(), dataLen)
 	buffer.Release()
 	if err != nil {
+		s.Close()
 		return 0, err
 	}
 
@@ -420,8 +461,6 @@ func (s *Session) writeControlFrame(frame frame) (int, error) {
 	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
 	buffer.Write(frame.data)
 
-	s.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
-
 	_, err := s.writeConn(buffer.Bytes())
 	buffer.Release()
 	if err != nil {
@@ -429,14 +468,27 @@ func (s *Session) writeControlFrame(frame frame) (int, error) {
 		return 0, err
 	}
 
-	s.conn.SetWriteDeadline(time.Time{})
-
 	return dataLen, nil
 }
 
 func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
+	isControl := len(payloadSize) == 0
+	if isControl {
+		s.controlPending.Add(1)
+	}
 	s.connLock.Lock()
-	defer s.connLock.Unlock()
+	if s.controlCond == nil {
+		s.controlCond = sync.NewCond(&s.connLock)
+	}
+	defer func() {
+		if isControl && s.controlPending.Add(-1) == 0 {
+			s.controlCond.Broadcast()
+		}
+		s.connLock.Unlock()
+	}()
+	for !isControl && s.controlPending.Load() > 0 {
+		s.controlCond.Wait()
+	}
 
 	if s.buffering {
 		s.buffer = slices.Concat(s.buffer, b)
@@ -445,19 +497,9 @@ func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
 		b = slices.Concat(s.buffer, b)
 		s.buffer = nil
 	}
-	if s.enhancedReady.Load() {
-		inputSize := len(b)
-		if len(payloadSize) > 0 && payloadSize[0] > 0 {
-			b = s.appendEnhancedPadding(b, payloadSize[0])
-		}
-		n, err = s.conn.Write(b)
-		if err == nil && n != len(b) {
-			err = io.ErrShortWrite
-		}
-		if n > inputSize {
-			n = inputSize
-		}
-		return n, err
+	if len(payloadSize) == 0 {
+		s.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+		defer s.conn.SetWriteDeadline(time.Time{})
 	}
 
 	// calulate & send padding
@@ -476,7 +518,7 @@ func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
 					}
 				}
 				if remainPayloadLen > l { // this packet is all payload
-					_, err = s.conn.Write(b[:l])
+					_, err = s.writeWire(b[:l])
 					if err != nil {
 						return 0, err
 					}
@@ -491,7 +533,7 @@ func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
 						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
 						b = slices.Concat(b, padding)
 					}
-					_, err = s.conn.Write(b)
+					_, err = s.writeWire(b)
 					if err != nil {
 						return 0, err
 					}
@@ -502,7 +544,7 @@ func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
 					padding[0] = cmdWaste
 					binary.BigEndian.PutUint32(padding[1:5], 0)
 					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
-					_, err = s.conn.Write(padding)
+					_, err = s.writeWire(padding)
 					if err != nil {
 						return 0, err
 					}
@@ -513,7 +555,7 @@ func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
 			if len(b) == 0 {
 				return
 			} else {
-				n2, err := s.conn.Write(b)
+				n2, err := s.writeWire(b)
 				return n + n2, err
 			}
 		} else {
@@ -521,52 +563,5 @@ func (s *Session) writeConn(b []byte, payloadSize ...int) (n int, err error) {
 		}
 	}
 
-	return s.conn.Write(b)
-}
-
-const (
-	enhancedPaddingSetting = "x-padding"
-	enhancedPaddingVersion = "1"
-	enhancedPaddingLimit   = uint64(64 * 1024)
-	enhancedPaddingMax     = uint64(256)
-	enhancedPaddingRatio   = uint64(20)
-)
-
-func (s *Session) enableEnhancedPadding() {
-	if s.enhancedReady.CompareAndSwap(false, true) && s.logger != nil {
-		s.logger.Debug("AnyTLS enhanced padding negotiated")
-	}
-}
-
-// appendEnhancedPadding appends a standard waste frame after application data.
-// Counters are session-local and guarded by connLock. The budget includes the
-// waste frame header and never exceeds 5% of post-negotiation application bytes.
-func (s *Session) appendEnhancedPadding(data []byte, payloadSize int) []byte {
-	dataLimit := enhancedPaddingLimit * enhancedPaddingRatio
-	if uint64(payloadSize) >= dataLimit-s.enhancedDataBytes {
-		s.enhancedDataBytes = dataLimit
-	} else {
-		s.enhancedDataBytes += uint64(payloadSize)
-	}
-	budget := s.enhancedDataBytes/enhancedPaddingRatio - s.enhancedPaddingBytes
-	if budget > enhancedPaddingMax {
-		budget = enhancedPaddingMax
-	}
-	if budget <= headerOverHeadSize {
-		return data
-	}
-	// The random range counts the full wire frame, including its seven-byte header.
-	size, err := rand.Int(rand.Reader, big.NewInt(int64(budget-headerOverHeadSize)))
-	if err != nil {
-		return data
-	}
-	frameSize := int(size.Int64()) + headerOverHeadSize + 1
-	waste := make([]byte, frameSize)
-	waste[0] = cmdWaste
-	binary.BigEndian.PutUint16(waste[5:7], uint16(frameSize-headerOverHeadSize))
-	if _, err = rand.Read(waste[headerOverHeadSize:]); err != nil {
-		return data
-	}
-	s.enhancedPaddingBytes += uint64(frameSize)
-	return slices.Concat(data, waste)
+	return s.writeShaped(b, payloadSize...)
 }

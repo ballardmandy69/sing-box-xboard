@@ -25,6 +25,8 @@ type Stream struct {
 	dieErr  error
 
 	reportOnce sync.Once
+	stateMu    sync.Mutex
+	hookCalled bool
 }
 
 // newStream initiates a Stream struct
@@ -40,8 +42,10 @@ func newStream(id uint32, sess *Session) *Stream {
 // Read implements net.Conn
 func (s *Stream) Read(b []byte) (n int, err error) {
 	n, err = s.pipeR.Read(b)
-	if n == 0 && s.dieErr != nil {
-		err = s.dieErr
+	if n == 0 {
+		if closeErr := s.closeError(); closeErr != nil {
+			err = closeErr
+		}
 	}
 	return
 }
@@ -53,8 +57,8 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		return 0, os.ErrDeadlineExceeded
 	default:
 	}
-	if s.dieErr != nil {
-		return 0, s.dieErr
+	if closeErr := s.closeError(); closeErr != nil {
+		return 0, closeErr
 	}
 	n, err = s.sess.writeDataFrame(s.id, b)
 	return
@@ -69,34 +73,72 @@ func (s *Stream) Close() error {
 func (s *Stream) closeLocally() {
 	var once bool
 	s.dieOnce.Do(func() {
+		s.stateMu.Lock()
 		s.dieErr = net.ErrClosed
 		s.pipeR.Close()
+		s.stateMu.Unlock()
 		once = true
 	})
 	if once {
-		if s.dieHook != nil {
-			s.dieHook()
-			s.dieHook = nil
-		}
+		s.runDieHook()
 	}
 }
 
 func (s *Stream) closeWithError(err error) error {
+	if err == nil {
+		err = net.ErrClosed
+	}
 	var once bool
 	s.dieOnce.Do(func() {
+		s.stateMu.Lock()
 		s.dieErr = err
 		s.pipeR.Close()
+		s.stateMu.Unlock()
 		once = true
 	})
 	if once {
-		if s.dieHook != nil {
-			s.dieHook()
-			s.dieHook = nil
-		}
+		s.runDieHook()
 		return s.sess.streamClosed(s.id)
 	} else {
-		return s.dieErr
+		return s.closeError()
 	}
+}
+
+func (s *Stream) closeError() error {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.dieErr
+}
+
+// setDieHook registers the pool callback, including when a remote close raced
+// with OpenStream returning. Callbacks run outside all Stream state locks.
+func (s *Stream) setDieHook(hook func()) {
+	s.stateMu.Lock()
+	if s.hookCalled || s.dieHook != nil {
+		s.stateMu.Unlock()
+		return
+	}
+	if s.dieErr != nil && hook != nil {
+		s.hookCalled = true
+		s.stateMu.Unlock()
+		hook()
+		return
+	}
+	s.dieHook = hook
+	s.stateMu.Unlock()
+}
+
+func (s *Stream) runDieHook() {
+	s.stateMu.Lock()
+	hook := s.dieHook
+	if s.hookCalled || hook == nil {
+		s.stateMu.Unlock()
+		return
+	}
+	s.hookCalled = true
+	s.dieHook = nil
+	s.stateMu.Unlock()
+	hook()
 }
 
 func (s *Stream) SetReadDeadline(t time.Time) error {
@@ -139,7 +181,7 @@ func (s *Stream) HandshakeFailure(err error) error {
 	s.reportOnce.Do(func() {
 		once = true
 	})
-	if once && err != nil && s.sess.peerVersion >= 2 {
+	if once && err != nil && s.sess.healthPeerVersion() >= 2 {
 		f := newFrame(cmdSYNACK, s.id)
 		f.data = []byte(err.Error())
 		if _, err := s.sess.writeControlFrame(f); err != nil {
@@ -155,7 +197,7 @@ func (s *Stream) HandshakeSuccess() error {
 	s.reportOnce.Do(func() {
 		once = true
 	})
-	if once && s.sess.peerVersion >= 2 {
+	if once && s.sess.healthPeerVersion() >= 2 {
 		if _, err := s.sess.writeControlFrame(newFrame(cmdSYNACK, s.id)); err != nil {
 			return err
 		}

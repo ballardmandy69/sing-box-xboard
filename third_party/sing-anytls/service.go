@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"os"
+	stdatomic "sync/atomic"
 
 	"github.com/anytls/sing-anytls/padding"
 	"github.com/anytls/sing-anytls/session"
@@ -21,12 +23,18 @@ import (
 )
 
 type Service struct {
-	users           map[[32]byte]string
+	users           stdatomic.Pointer[userSnapshot]
 	padding         atomic.TypedValue[*padding.PaddingFactory]
 	handler         N.TCPConnectionHandlerEx
 	fallbackHandler N.TCPConnectionHandlerEx
 	logger          logger.ContextLogger
 	enhancedPadding bool
+	disablePadding  bool
+}
+
+// userSnapshot is immutable after publication; readers never lock or scan users.
+type userSnapshot struct {
+	byDigest map[[32]byte]string
 }
 
 type ServiceConfig struct {
@@ -36,6 +44,7 @@ type ServiceConfig struct {
 	FallbackHandler N.TCPConnectionHandlerEx
 	Logger          logger.ContextLogger
 	EnhancedPadding bool
+	DisablePadding  bool
 }
 
 type User struct {
@@ -48,19 +57,21 @@ func NewService(config ServiceConfig) (*Service, error) {
 		handler:         config.Handler,
 		fallbackHandler: config.FallbackHandler,
 		logger:          config.Logger,
-		users:           make(map[[32]byte]string),
-		enhancedPadding: config.EnhancedPadding,
+		enhancedPadding: config.EnhancedPadding && !config.DisablePadding,
+		disablePadding:  config.DisablePadding,
 	}
 
 	if service.handler == nil || service.logger == nil {
 		return nil, os.ErrInvalid
 	}
 
-	for _, user := range config.Users {
-		service.users[sha256.Sum256([]byte(user.Password))] = user.Name
-	}
+	service.UpdateUsers(config.Users)
 
-	if !padding.UpdatePaddingScheme(config.PaddingScheme, &service.padding) {
+	scheme := config.PaddingScheme
+	if config.DisablePadding {
+		scheme = []byte("stop=0")
+	}
+	if !padding.UpdatePaddingScheme(scheme, &service.padding) {
 		return nil, errors.New("incorrect padding scheme format")
 	}
 
@@ -72,44 +83,63 @@ func (s *Service) UpdateUsers(users []User) {
 	for _, user := range users {
 		u[sha256.Sum256([]byte(user.Password))] = user.Name
 	}
-	s.users = u
+	s.users.Store(&userSnapshot{byDigest: u})
+}
+
+func (s *Service) lookupUser(digest [32]byte) (string, bool) {
+	snapshot := s.users.Load()
+	if snapshot == nil {
+		return "", false
+	}
+	user, ok := snapshot.byDigest[digest]
+	return user, ok
 }
 
 // NewConnection `conn` should be plaintext
 func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
-	b := buf.NewPacket()
-	defer b.Release()
+	return s.NewConnectionWithAuth(ctx, conn, source, onClose, nil)
+}
 
-	n, err := b.ReadOnceFrom(conn)
+// NewConnectionWithAuth calls onAuthenticated after the complete authentication
+// header and padding, before session construction or destination processing.
+func (s *Service) NewConnectionWithAuth(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc, onAuthenticated func(context.Context) error) error {
+	// Authentication is a byte stream and can span TCP reads or TLS records.
+	// Read exactly each bounded field, leaving coalesced session frames on conn.
+	var header [34]byte
+	n, err := io.ReadFull(conn, header[:32])
 	if err != nil {
-		return err
-	}
-	conn = bufio.NewCachedConn(conn, b)
-
-	by, err := b.ReadBytes(32)
-	if err != nil {
-		b.Resize(0, n)
-		return s.fallback(ctx, conn, source, err, onClose)
+		if n == 0 {
+			return err
+		}
+		return s.fallbackPrefix(ctx, conn, source, header[:n], err, onClose)
 	}
 	var passwordSha256 [32]byte
-	copy(passwordSha256[:], by)
-	if user, ok := s.users[passwordSha256]; ok {
+	copy(passwordSha256[:], header[:32])
+	if user, ok := s.lookupUser(passwordSha256); ok {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
-		b.Resize(0, n)
-		return s.fallback(ctx, conn, source, E.New("unknown user password"), onClose)
+		return s.fallbackPrefix(ctx, conn, source, header[:32], E.New("unknown user password"), onClose)
 	}
-	by, err = b.ReadBytes(2)
+	n, err = io.ReadFull(conn, header[32:])
 	if err != nil {
-		b.Resize(0, n)
-		return s.fallback(ctx, conn, source, E.Extend(err, "read padding length"), onClose)
+		return s.fallbackPrefix(ctx, conn, source, header[:32+n], E.Extend(err, "read padding length"), onClose)
 	}
-	paddingLen := binary.BigEndian.Uint16(by)
+	paddingLen := binary.BigEndian.Uint16(header[32:])
+	if s.disablePadding && paddingLen != 0 {
+		return E.New("authentication padding is disabled")
+	}
 	if paddingLen > 0 {
-		_, err = b.ReadBytes(int(paddingLen))
+		// uint16 bounds this allocation to 65535 bytes after user authentication.
+		authPadding := make([]byte, int(paddingLen))
+		n, err = io.ReadFull(conn, authPadding)
 		if err != nil {
-			b.Resize(0, n)
-			return s.fallback(ctx, conn, source, E.Extend(err, "read padding"), onClose)
+			prefix := append(header[:], authPadding[:n]...)
+			return s.fallbackPrefix(ctx, conn, source, prefix, E.Extend(err, "read padding"), onClose)
+		}
+	}
+	if onAuthenticated != nil {
+		if err = onAuthenticated(ctx); err != nil {
+			return err
 		}
 	}
 
@@ -121,10 +151,21 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 		}
 
 		s.handler.NewConnectionEx(ctx, stream, source, destination, onClose)
-	}, &s.padding, s.logger, s.enhancedPadding)
+	}, &s.padding, s.logger, s.enhancedPadding, s.disablePadding)
 	session.Run()
 	session.Close()
 	return nil
+}
+
+// fallbackPrefix restores every consumed authentication byte for the fallback.
+func (s *Service) fallbackPrefix(ctx context.Context, conn net.Conn, source M.Socksaddr, prefix []byte, err error, onClose N.CloseHandlerFunc) error {
+	if s.fallbackHandler == nil {
+		return s.fallback(ctx, conn, source, err, onClose)
+	}
+	buffer := buf.NewSize(len(prefix))
+	buffer.Write(prefix)
+	defer buffer.Release()
+	return s.fallback(ctx, bufio.NewCachedConn(conn, buffer), source, err, onClose)
 }
 
 func (s *Service) fallback(ctx context.Context, conn net.Conn, source M.Socksaddr, err error, onClose N.CloseHandlerFunc) error {

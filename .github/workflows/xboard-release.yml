@@ -9,55 +9,94 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+      - name: Native transport and panel configuration
+        run: go test -race ./transport/anytlsnative ./protocol/anytlsnative ./cmd/sing-box ./service/xboard
+      - name: AnyTLS interoperability
+        working-directory: third_party/sing-anytls
+        run: go test -race ./... -count=1 -timeout=180s
+      - name: Installation and configuration smoke tests
+        run: |
+          go build -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+          SING_BOX_BINARY="$RUNNER_TEMP/sing-box" bash test/install_test.sh
   release:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - arch: amd64
+            goos: linux
             goarch: amd64
             goamd64: v1
           - arch: amd64v3
+            goos: linux
             goarch: amd64
             goamd64: v3
           - arch: arm64
+            goos: linux
             goarch: arm64
+            goamd64: v1
+          - arch: windows-amd64
+            goos: windows
+            goarch: amd64
             goamd64: v1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: '1.26.5'
       - name: Build
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOAMD64: ${{ matrix.goamd64 }}
           CGO_ENABLED: '0'
         run: |
           go build -trimpath -ldflags="-s -w -X github.com/sagernet/sing-box/constant.Version=${GITHUB_REF_NAME#v}" -o sing-box ./cmd/sing-box
-          tar -czf sing-box-xboard-${{ matrix.arch }}.tar.gz sing-box
-      - name: Checksums
-        run: sha256sum sing-box-xboard-${{ matrix.arch }}.tar.gz > SHA256SUMS-${{ matrix.arch }}.txt
+          if [ "$GOOS" = linux ]; then
+            bash release/package-xboard.sh sing-box ${{ matrix.arch }} artifacts
+          else
+            mkdir -p artifacts
+            mv sing-box artifacts/sing-box-windows-amd64.exe
+            (cd artifacts && sha256sum sing-box-windows-amd64.exe > SHA256SUMS-windows-amd64.txt)
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: xboard-${{ matrix.arch }}
           path: |
-            sing-box-xboard-${{ matrix.arch }}.tar.gz
-            SHA256SUMS-${{ matrix.arch }}.txt
+            artifacts/sing-box-xboard-${{ matrix.arch }}.tar.gz
+            artifacts/sing-box-windows-amd64.exe
+            artifacts/SHA256SUMS-${{ matrix.arch }}.txt
   publish:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           pattern: xboard-*
           merge-multiple: true
       - name: Merge checksums
-        run: cat artifacts/SHA256SUMS-*.txt | sed 's#artifacts/##' > artifacts/SHA256SUMS.txt
+        run: |
+          cat artifacts/SHA256SUMS-*.txt > artifacts/SHA256SUMS.txt
+          cp install.sh sb-auto.sh artifacts/
+          cp docs/xboard-config.md artifacts/USAGE.md
+          cp docs/anytls-native.md artifacts/anytls-native.md
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/sing-box-xboard-*.tar.gz
+            artifacts/sing-box-windows-amd64.exe
             artifacts/SHA256SUMS.txt
+            artifacts/install.sh
+            artifacts/sb-auto.sh
+            artifacts/USAGE.md
+            artifacts/anytls-native.md

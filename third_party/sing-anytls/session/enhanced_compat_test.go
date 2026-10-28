@@ -63,7 +63,8 @@ func TestEnhancedNegotiationFixtures(t *testing.T) {
 			{"v1", "1", "1", true, false},
 			{"bad-version", "invalid", "1", true, false},
 			{"missing-capability", "2", "", true, false},
-			{"future-capability", "2", "2", true, false},
+			{"both-shaping-v2", "2", "2", true, true},
+			{"future-capability", "2", "3", true, false},
 			{"malicious-capability", "2", "1,unexpected", true, false},
 			{"local-disabled", "2", "1", false, false},
 		} {
