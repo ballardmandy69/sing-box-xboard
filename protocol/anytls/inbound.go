@@ -61,9 +61,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		Users: common.Map(options.Users, func(it option.AnyTLSUser) anytls.User {
 			return anytls.User(it)
 		}),
-		PaddingScheme: paddingScheme,
-		Handler:       (*inboundHandler)(inbound),
-		Logger:        logger,
+		PaddingScheme:   paddingScheme,
+		EnhancedPadding: options.EnhancedPadding,
+		Handler:         (*inboundHandler)(inbound),
+		Logger:          logger,
 	})
 	if err != nil {
 		return nil, err

@@ -1,0 +1,39 @@
+name: AnyTLS compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'third_party/sing-anytls/**'
+      - 'protocol/anytls/**'
+      - 'option/anytls.go'
+      - 'go.mod'
+      - '.github/workflows/anytls-compat.yml'
+  pull_request:
+    paths:
+      - 'third_party/sing-anytls/**'
+      - 'protocol/anytls/**'
+      - 'option/anytls.go'
+      - 'go.mod'
+      - '.github/workflows/anytls-compat.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Upstream interoperability, TLS and padding budget
+        working-directory: third_party/sing-anytls
+        run: go test -race ./... -count=1 -timeout=180s
+      - name: sing-box integration
+        run: go test ./protocol/anytls ./option ./cmd/sing-box
+      - name: Build client and server
+        run: go build ./cmd/sing-box

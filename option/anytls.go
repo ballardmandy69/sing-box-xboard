@@ -5,8 +5,9 @@ import "github.com/sagernet/sing/common/json/badoption"
 type AnyTLSInboundOptions struct {
 	ListenOptions
 	InboundTLSOptionsContainer
-	Users         []AnyTLSUser               `json:"users,omitempty"`
-	PaddingScheme badoption.Listable[string] `json:"padding_scheme,omitempty"`
+	Users           []AnyTLSUser               `json:"users,omitempty"`
+	PaddingScheme   badoption.Listable[string] `json:"padding_scheme,omitempty"`
+	EnhancedPadding bool                       `json:"enhanced_padding,omitempty"`
 }
 
 type AnyTLSUser struct {
@@ -23,4 +24,5 @@ type AnyTLSOutboundOptions struct {
 	IdleSessionTimeout       badoption.Duration `json:"idle_session_timeout,omitempty"`
 	MinIdleSession           int                `json:"min_idle_session,omitempty"`
 	ClientMetadata           string             `json:"client_metadata,omitempty"`
+	EnhancedPadding          bool               `json:"enhanced_padding,omitempty"`
 }

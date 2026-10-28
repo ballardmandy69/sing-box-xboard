@@ -1,5 +1,7 @@
 module github.com/sagernet/sing-box
 
+replace github.com/anytls/sing-anytls => ./third_party/sing-anytls
+
 go 1.25.5
 
 require (
