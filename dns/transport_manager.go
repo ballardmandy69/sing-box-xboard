@@ -25,6 +25,7 @@ type TransportManager struct {
 	defaultTransport         adapter.DNSTransport
 	defaultTransportFallback func() (adapter.DNSTransport, error)
 	fakeIPTransport          adapter.FakeIPTransport
+	legacyFakeIPTransport    adapter.FakeIPTransport
 }
 
 func NewTransportManager(registry adapter.DNSTransportRegistry, outbound adapter.OutboundManager, defaultTag string) *TransportManager {
@@ -41,6 +42,11 @@ func (m *TransportManager) Initialize(defaultTransportFallback func() (adapter.D
 }
 
 func (m *TransportManager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if m.legacyFakeIPTransport != nil {
+		if err := scope.Start("legacy fakeip store", m.legacyFakeIPTransport, stage); err != nil {
+			return err
+		}
+	}
 	m.access.Lock()
 	if stage == adapter.StartStateInitialize {
 		if m.defaultTag != "" && m.defaultTransport == nil {
@@ -170,15 +176,20 @@ func (m *TransportManager) Create(ctx context.Context, logger log.ContextLogger,
 	m.transportByTag[tag] = transport
 	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultTransport == nil) {
 		if transport.Type() == C.DNSTypeFakeIP {
-			return E.New("default server cannot be fakeip")
+			if _, isLegacy := transport.(*legacyFakeIPAlias); !isLegacy {
+				return E.New("default server cannot be fakeip")
+			}
 		}
 		m.defaultTransport = transport
 	}
 	if transport.Type() == C.DNSTypeFakeIP {
 		if m.fakeIPTransport != nil {
-			return E.New("multiple fakeip server are not supported")
+			if _, isLegacy := transport.(*legacyFakeIPAlias); !isLegacy || m.legacyFakeIPTransport == nil {
+				return E.New("multiple fakeip server are not supported")
+			}
+		} else {
+			m.fakeIPTransport = transport.(adapter.FakeIPTransport)
 		}
-		m.fakeIPTransport = transport.(adapter.FakeIPTransport)
 	}
 	return nil
 }

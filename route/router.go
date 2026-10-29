@@ -35,6 +35,7 @@ type Router struct {
 	network           adapter.NetworkManager
 	httpClientManager adapter.HTTPClientManager
 	rules             []adapter.Rule
+	ipOnDemand        bool
 	needFindProcess   bool
 	needFindNeighbor  bool
 	leaseFiles        []string
@@ -47,9 +48,12 @@ type Router struct {
 	pauseManager      pause.Manager
 	trackers          []adapter.ConnectionTracker
 	platformInterface adapter.PlatformInterface
+	legacyGeo         *R.LegacyGeoStore
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions) *Router {
+	legacyGeo := R.NewLegacyGeoStore(ctx, logFactory.NewLogger("geo"), options)
+	service.MustRegisterPtr(ctx, legacyGeo)
 	return &Router{
 		ctx:               ctx,
 		logger:            logFactory.NewLogger("router"),
@@ -61,12 +65,14 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		network:           service.FromContext[adapter.NetworkManager](ctx),
 		httpClientManager: service.FromContext[adapter.HTTPClientManager](ctx),
 		rules:             make([]adapter.Rule, 0, len(options.Rules)),
+		ipOnDemand:        options.IPOnDemand,
 		ruleSetMap:        make(map[string]adapter.RuleSet),
 		needFindProcess:   hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
 		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
 		leaseFiles:        options.DHCPLeaseFiles,
 		pauseManager:      service.FromContext[pause.Manager](ctx),
 		platformInterface: service.FromContext[adapter.PlatformInterface](ctx),
+		legacyGeo:         legacyGeo,
 	}
 }
 
@@ -102,6 +108,7 @@ func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	monitor := taskmonitor.New(r.logger, C.StartTimeout)
 	switch stage {
 	case adapter.StartStateInitialize:
+		scope.Add(r.legacyGeo.Close)
 		for _, ruleSet := range r.ruleSets {
 			scope.Add(ruleSet.Close)
 		}
@@ -137,6 +144,9 @@ func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 			}
 		}
 	case adapter.StartStateStart:
+		if err := r.legacyGeo.Reload(); err != nil {
+			return E.Cause(err, "initialize legacy geographic databases")
+		}
 		var startContext *adapter.HTTPStartContext
 		if len(r.ruleSets) > 0 {
 			monitor.Start("initialize rule-set")

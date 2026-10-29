@@ -249,7 +249,12 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}
 	if h.tracker != nil {
-		conn = h.tracker.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, h.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
@@ -274,7 +279,12 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
 	}
 	if h.tracker != nil {
-		conn = h.tracker.TrackPacketConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackPacketConnection(ctx, h.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }

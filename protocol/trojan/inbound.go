@@ -240,7 +240,12 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 	if tracker := h.tracker.Load(); tracker != nil {
-		conn = tracker.value.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, tracker.value, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
@@ -261,7 +266,12 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
 	if tracker := h.tracker.Load(); tracker != nil {
-		conn = tracker.value.TrackPacketConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackPacketConnection(ctx, tracker.value, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }

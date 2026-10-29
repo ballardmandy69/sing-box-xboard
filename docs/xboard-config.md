@@ -143,10 +143,28 @@ bash <(curl -fLSs https://raw.githubusercontent.com/ballardmandy69/sing-box-xboa
 
 下载后校验配置，保存为 `a.json` / `a.yml`，启动独立实例；失败恢复旧配置并尝试恢复原服务状态，恢复操作失败会明确提示。证书、私钥文件应提前存在，配置下载服务需保护其中的 API token。
 
-## 兼容边界
+## 已发布 v1.14.3-xboard-native.2 的兼容边界
 
 已对齐此处三种协议的节点布局、面板用户与流量同步、监听覆盖、证书、PROXY protocol 和 AutoOutIP；不是 nyafw 全功能复刻。自动节点暂限普通 TCP、标准 TLS，未实现 WebSocket、gRPC、Reality 或 `MultiApiConfig`。
 
 旧全局 `IPLimit`、`RateLimit`、`ConnectionLimit`、`HotUserCacheSec`、`ConnectionCleanupIntervalSec` 等兼容字段不会启用原后端对应限制；面板 `speed_limit`、`device_limit` 也尚未执行。不要将它们当作已经生效的限速或限设备保障。`DisableAccessLog: true` 目前会禁用整个日志输出，建议保留 false。`AcceptAnyTLS`、`ForceMux`、`TLSJson` 等原后端专有扩展未接入。
 
 Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新增并发多流 mux 或冷连接 0-RTT。不宣称私有协议无法被识别，也不保证解决公网 IP 的 TCP 阻断。
+
+## 完整复现开发分支
+
+`codex/nyafw-full-parity` 中的当前源码已进一步接入下列能力，尚未发布对应版本；
+上文固定版本的安装命令仍安装 v2，不能把开发分支选项当作 v2 已有功能。
+
+- TCP VMess、VLESS、Shadowsocks 和 SS2022 的自动面板节点；支持的 WS、HTTPUpgrade、gRPC 组合有真实客户端测试。
+- UniProxy `MultiApiConfig` 聚合、全局与用户限速、IP/连接数/请求配额、ReportAlive。
+- 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
+- 旧 DNS/FakeIP、GeoIP/Geosite、ip_on_demand、旧入站嗅探与域名策略。
+- `ShadowsocksObfsMu` HTTP 前导机制。它不等于 WebSocket：101 后直接传输 SS 密文，没有 WS 帧。
+
+当前源码的 `check` 不访问面板；运行后先同步用户、再同步节点配置，成功后才开放监听。
+首次同步失败会退避重试。安装烟测覆盖配置离线检查与真实节点进程启动两部分。
+
+所有代理 UDP 协议和 UDP 转发均排除，内部 DNS 保留配置语义。
+仍有其他面板、私有扩展组合、规则和资源管理功能未完成；详细进度及证据限制见
+[完整复现清单](nyafw-parity.md)。完成原版运行对照前，不称为完整兼容版。

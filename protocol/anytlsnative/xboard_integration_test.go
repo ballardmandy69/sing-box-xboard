@@ -96,7 +96,7 @@ func TestNativeXBoardUserAndTraffic(t *testing.T) {
 			if err := nativeExchange(nativeGetOutbound(t, client, "native"), nativeEchoServer(t), dataSize); err != nil {
 				t.Fatalf("panel-provided UUID did not authenticate an encrypted TCP exchange: %v", err)
 			}
-			if event := nativeNextRoute(t, tracker); event.user != userUUID {
+			if event := nativeNextRoute(t, tracker); event.user != "101@panel@uniproxy" {
 				t.Fatal("native transport was not bound to the panel user")
 			}
 

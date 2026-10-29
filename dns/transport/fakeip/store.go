@@ -21,6 +21,7 @@ type Store struct {
 	inet4Last  netip.Addr
 	inet6Last  netip.Addr
 	storage    adapter.FakeIPStorage
+	legacy     bool
 
 	addressAccess sync.Mutex
 	inet4Current  netip.Addr
@@ -75,9 +76,15 @@ func (s *Store) Start() error {
 	} else {
 		if s.inet4Range.IsValid() {
 			s.inet4Current = s.inet4Range.Addr().Next()
+			if s.legacy {
+				s.inet4Current = s.inet4Current.Next()
+			}
 		}
 		if s.inet6Range.IsValid() {
 			s.inet6Current = s.inet6Range.Addr().Next()
+			if s.legacy {
+				s.inet6Current = s.inet6Current.Next()
+			}
 		}
 		_ = storage.FakeIPReset()
 	}
@@ -123,7 +130,7 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
 			return netip.Addr{}, E.New("missing IPv4 fakeip address range")
 		}
 		nextAddress := s.inet4Current.Next()
-		if nextAddress == s.inet4Last || !s.inet4Range.Contains(nextAddress) {
+		if !s.legacy && nextAddress == s.inet4Last || !s.inet4Range.Contains(nextAddress) {
 			nextAddress = s.inet4Range.Addr().Next().Next()
 		}
 		s.inet4Current = nextAddress
@@ -133,7 +140,7 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
 			return netip.Addr{}, E.New("missing IPv6 fakeip address range")
 		}
 		nextAddress := s.inet6Current.Next()
-		if nextAddress == s.inet6Last || !s.inet6Range.Contains(nextAddress) {
+		if !s.legacy && nextAddress == s.inet6Last || !s.inet6Range.Contains(nextAddress) {
 			nextAddress = s.inet6Range.Addr().Next().Next()
 		}
 		s.inet6Current = nextAddress

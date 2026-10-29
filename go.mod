@@ -2,6 +2,10 @@ module github.com/sagernet/sing-box
 
 replace github.com/anytls/sing-anytls => ./third_party/sing-anytls
 
+replace github.com/sagernet/sing-vmess => ./third_party/sing-vmess
+
+replace github.com/sagernet/sing-shadowsocks => ./third_party/sing-shadowsocks
+
 go 1.25.5
 
 require (
@@ -191,7 +195,7 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
+	golang.org/x/time v0.15.0
 	golang.org/x/tools v0.47.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect

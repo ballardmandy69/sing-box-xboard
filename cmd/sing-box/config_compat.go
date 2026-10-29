@@ -49,17 +49,58 @@ func normalizeLegacyServerConfig(value any) any {
 			continue
 		}
 		apiConfig, _ := node["ApiConfig"].(map[string]any)
+		panelType := legacyPanelType(node, apiConfig)
 		panelTag := legacyString(apiConfig["PanelTag"])
 		if panelTag == "" {
 			panelTag = "xboard-" + strconv.Itoa(index)
 		}
 		nodeType := strings.ToLower(legacyString(apiConfig["NodeType"]))
 		service := map[string]any{
-			"type":    "xboard",
-			"tag":     panelTag,
-			"inbound": panelTag,
+			"type":          "xboard",
+			"tag":           panelTag,
+			"inbound":       panelTag,
+			"sync_interval": "0s",
+		}
+		if panelType == "multi" {
+			rawPanels, _ := node["MultiApiConfig"].([]any)
+			panels := make([]any, 0, len(rawPanels))
+			for _, rawPanel := range rawPanels {
+				panel, _ := rawPanel.(map[string]any)
+				panels = append(panels, normalizeLegacyPanelAPI(panel, "uniproxy"))
+			}
+			service["panels"] = panels
+			if len(rawPanels) > 0 {
+				primary, _ := rawPanels[0].(map[string]any)
+				nodeType = strings.ToLower(legacyString(primary["NodeType"]))
+			}
+		} else {
+			for field, value := range normalizeLegacyPanelAPI(apiConfig, panelType) {
+				if field != "panel_tag" {
+					service[field] = value
+				}
+			}
+		}
+		for legacyKey, field := range map[string]string{
+			"IPLimit": "ip_limit", "ConnectionLimit": "connection_limit", "RateLimit": "rate_limit",
+		} {
+			if value, exists := root[legacyKey]; exists {
+				if number, ok := legacyInteger(value); ok {
+					service[field] = number
+				} else {
+					service[field] = value
+				}
+			}
+		}
+		if maximum, exists := root["MaxSpeedLimit"]; exists {
+			service["default_max_speed_limit"] = fmt.Sprint(maximum)
+		}
+		if maximum, exists := node["MaxSpeedLimit"]; exists {
+			service["max_speed_limit"] = fmt.Sprint(maximum)
 		}
 		autoInbound := map[string]any{}
+		if obfs, exists := node["ShadowsocksObfsMu"]; exists {
+			autoInbound["shadowsocks_obfs_mu"] = obfs
+		}
 		if protocol := legacyString(node["Protocol"]); protocol != "" {
 			autoInbound["protocol"] = strings.ToLower(protocol)
 		}
@@ -70,7 +111,7 @@ func normalizeLegacyServerConfig(value any) any {
 			autoInbound["listen_port"] = port
 		}
 		for legacyKey, field := range map[string]string{
-			"ProxyProtocol": "proxy_protocol", "AutoOutIP": "auto_out_ip",
+			"ProxyProtocol": "proxy_protocol", "AutoOutIP": "auto_out_ip", "ForceVision": "force_vision",
 		} {
 			if enabled, ok := node[legacyKey].(bool); ok {
 				autoInbound[field] = enabled
@@ -90,46 +131,64 @@ func normalizeLegacyServerConfig(value any) any {
 		if static, _ := node["StaticInbound"].(bool); !static {
 			service["auto_inbound"] = autoInbound
 		}
-		if host := legacyString(apiConfig["ApiHost"]); host != "" {
-			service["api_host"] = host
-		}
-		if key := legacyString(apiConfig["ApiKey"]); key != "" {
-			service["api_key"] = key
-		}
 		if nodeType != "" {
 			service["node_type"] = nodeType
 		}
-		if nodeID, ok := legacyInteger(apiConfig["NodeID"]); ok {
-			service["node_id"] = nodeID
-		}
 		if interval := legacyDuration(node["UpdateInterval"]); interval != "" {
-			service["pull_interval"] = interval
-			service["push_interval"] = interval
+			service["sync_interval"] = interval
 		}
-		if timeout := legacyDuration(apiConfig["Timeout"]); timeout != "" {
-			service["timeout"] = timeout
+		if reportAlive, ok := apiConfig["ReportAlive"].(bool); ok {
+			service["report_alive"] = reportAlive
 		}
 		if disableUpload, ok := node["DisableUploadTraffic"].(bool); ok {
 			service["disable_upload_traffic"] = disableUpload
 		}
-		if factor, ok := legacyFloat(node["TrafficFactor"]); ok {
+		factor, factorSet := legacyFloat(node["TrafficFactor"])
+		if !factorSet || factor <= 0 {
+			factor, factorSet = legacyFloat(root["TrafficFactor"])
+		}
+		if factorSet {
 			service["traffic_factor"] = factor
 		}
 		services = append(services, service)
 	}
 	root["services"] = services
-	if disabled, ok := root["DisableAccessLog"].(bool); ok && disabled {
-		logOptions, _ := root["log"].(map[string]any)
-		if logOptions == nil {
-			logOptions = make(map[string]any)
-		}
-		logOptions["disabled"] = true
-		root["log"] = logOptions
+	nyafw, _ := root["nyafw"].(map[string]any)
+	if nyafw == nil {
+		nyafw = make(map[string]any)
 	}
+	if interval, exists := root["ConnectionCleanupIntervalSec"]; exists {
+		nyafw["connection_cleanup_interval_sec"] = interval
+	}
+	if duration, exists := root["HotUserCacheSec"]; exists {
+		nyafw["hot_user_cache_sec"] = duration
+	}
+	if mode, exists := root["AccessLog"]; exists {
+		nyafw["access_log"] = mode
+	} else if disabled, _ := root["DisableAccessLog"].(bool); disabled {
+		// Compatibility alias: it controls access records, never process error logs.
+		nyafw["access_log"] = 2
+	}
+	if rawAPI, exists := root["SbApi"]; exists {
+		if api, ok := rawAPI.(map[string]any); ok {
+			converted := make(map[string]any)
+			for old, field := range map[string]string{
+				"BaseURL": "base_url", "Tag": "tag", "Token": "token", "SendTokenInQuery": "send_token_in_query",
+			} {
+				if value, exists := api[old]; exists {
+					converted[field] = value
+				}
+			}
+			nyafw["sb_api"] = converted
+		} else {
+			nyafw["sb_api"] = rawAPI
+		}
+	}
+	root["nyafw"] = nyafw
 	for _, key := range []string{
-		"Nodes", "DisableAccessLog", "DisablePrintAccessLog", "SbApi", "IPLimit", "RateLimit",
+		"Nodes", "AccessLog", "DisableAccessLog", "DisablePrintAccessLog", "SbApi", "IPLimit", "RateLimit",
 		"ConnectionCleanupIntervalSec", "HotUserCacheSec", "ShadowsocksBanIP", "QuicBbrWrongLogic",
-		"ConnectionLimit", "MemoryGuard",
+		"ConnectionLimit", "MemoryGuard", "MaxSpeedLimit", "TrafficFactor",
 	} {
 		delete(root, key)
 	}
@@ -158,11 +217,26 @@ func validateLegacyNodes(value any) error {
 		if !ok {
 			return fmt.Errorf("Nodes[%d] must be an object", index)
 		}
-		if nodeType := legacyString(node["Type"]); nodeType != "" && !strings.EqualFold(nodeType, "UniProxy") {
-			return fmt.Errorf("Nodes[%d].Type must be UniProxy", index)
-		}
 		api, ok := node["ApiConfig"].(map[string]any)
-		if !ok {
+		panelType := legacyPanelType(node, api)
+		if panelType != "uniproxy" && panelType != "multi" {
+			return fmt.Errorf("Nodes[%d].Type must be UniProxy or multi in the current reconstruction", index)
+		}
+		if panelType == "multi" {
+			panels, ok := node["MultiApiConfig"].([]any)
+			if !ok || len(panels) == 0 {
+				return fmt.Errorf("Nodes[%d].MultiApiConfig must be a nonempty array", index)
+			}
+			for child, rawPanel := range panels {
+				panel, ok := rawPanel.(map[string]any)
+				if !ok {
+					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d] must be an object", index, child)
+				}
+				if kind := legacyString(panel["Type"]); kind != "" && !strings.EqualFold(kind, "uniproxy") {
+					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d].Type currently supports only UniProxy", index, child)
+				}
+			}
+		} else if !ok {
 			return fmt.Errorf("Nodes[%d].ApiConfig must be an object", index)
 		}
 		tag := legacyString(api["PanelTag"])
@@ -179,7 +253,7 @@ func validateLegacyNodes(value any) error {
 				return fmt.Errorf("Nodes[%d].ListenPort must be an integer between 0 and 65535", index)
 			}
 		}
-		for _, field := range []string{"AutoOutIP", "ProxyProtocol", "StaticInbound"} {
+		for _, field := range []string{"AutoOutIP", "ProxyProtocol", "StaticInbound", "ForceVision"} {
 			if value, exists := node[field]; exists {
 				if _, ok := value.(bool); !ok {
 					return fmt.Errorf("Nodes[%d].%s must be a boolean", index, field)
@@ -188,6 +262,42 @@ func validateLegacyNodes(value any) error {
 		}
 	}
 	return nil
+}
+
+func legacyPanelType(node, api map[string]any) string {
+	kind := legacyString(api["Type"])
+	if kind == "" {
+		kind = legacyString(node["Type"])
+	}
+	if kind == "" {
+		kind = "uniproxy"
+	}
+	return strings.ToLower(kind)
+}
+
+func normalizeLegacyPanelAPI(api map[string]any, fallbackType string) map[string]any {
+	kind := legacyString(api["Type"])
+	if kind == "" {
+		kind = fallbackType
+	}
+	result := map[string]any{"panel_type": strings.ToLower(kind)}
+	for legacy, field := range map[string]string{
+		"PanelTag": "panel_tag", "ApiHost": "api_host", "ApiKey": "api_key", "NodeType": "node_type",
+	} {
+		if value := legacyString(api[legacy]); value != "" {
+			if field == "node_type" {
+				value = strings.ToLower(value)
+			}
+			result[field] = value
+		}
+	}
+	if nodeID, ok := legacyInteger(api["NodeID"]); ok {
+		result["node_id"] = nodeID
+	}
+	if timeout := legacyDuration(api["Timeout"]); timeout != "" {
+		result["timeout"] = timeout
+	}
+	return result
 }
 
 func legacyString(value any) string {

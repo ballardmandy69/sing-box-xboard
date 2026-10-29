@@ -9,6 +9,7 @@ type ShadowsocksInboundOptions struct {
 	Destinations []ShadowsocksDestination `json:"destinations,omitempty"`
 	Multiplex    *InboundMultiplexOptions `json:"multiplex,omitempty"`
 	Managed      bool                     `json:"managed,omitempty"`
+	ObfsMu       string                   `json:"obfs_mu,omitempty"`
 }
 
 type ShadowsocksUser struct {

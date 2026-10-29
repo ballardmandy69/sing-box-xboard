@@ -3,13 +3,11 @@ package listener
 import (
 	"context"
 	"net"
-	"net/netip"
 	"os"
 	"strings"
-	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/redir"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/buf"
 	sBufio "github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/control"
@@ -25,45 +23,8 @@ func (l *Listener) ListenUDP() (net.PacketConn, error) {
 	return l.ListenUDPWithConfig(net.ListenConfig{})
 }
 
-func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.PacketConn, error) {
-	bindAddr := M.SocksaddrFrom(l.listenOptions.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1})), l.listenOptions.ListenPort)
-	if l.listenOptions.BindInterface != "" {
-		listenConfig.Control = control.Append(listenConfig.Control, control.BindToInterface(service.FromContext[adapter.NetworkManager](l.ctx).InterfaceFinder(), l.listenOptions.BindInterface, -1))
-	}
-	if l.listenOptions.RoutingMark != 0 {
-		listenConfig.Control = control.Append(listenConfig.Control, control.RoutingMark(uint32(l.listenOptions.RoutingMark)))
-	}
-	if l.listenOptions.ReuseAddr {
-		listenConfig.Control = control.Append(listenConfig.Control, control.ReuseAddr())
-	}
-	var udpFragment bool
-	if l.listenOptions.UDPFragment != nil {
-		udpFragment = *l.listenOptions.UDPFragment
-	} else {
-		udpFragment = l.listenOptions.UDPFragmentDefault
-	}
-	if udpFragment {
-		listenConfig.Control = control.Append(listenConfig.Control, control.EnableUDPFragment())
-	} else {
-		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
-	}
-	if l.tproxy {
-		listenConfig.Control = control.Append(listenConfig.Control, func(network, address string, conn syscall.RawConn) error {
-			return control.Raw(conn, func(fd uintptr) error {
-				return redir.TProxy(fd, !strings.HasSuffix(network, "4"), true)
-			})
-		})
-	}
-	udpConn, err := ListenNetworkNamespace[net.PacketConn](l.ctx, l.listenOptions.NetNs, func() (net.PacketConn, error) {
-		return listenConfig.ListenPacket(l.ctx, M.NetworkFromNetAddr(N.NetworkUDP, bindAddr.Addr), bindAddr.String())
-	})
-	if err != nil {
-		return nil, err
-	}
-	l.udpConn = udpConn.(*net.UDPConn)
-	l.udpAddr = bindAddr
-	l.logger.Info("udp server started at ", udpConn.LocalAddr())
-	return udpConn, err
+func (l *Listener) ListenUDPWithConfig(_ net.ListenConfig) (net.PacketConn, error) {
+	return nil, C.ErrUDPDisabled
 }
 
 func (l *Listener) DialContext(dialer net.Dialer, ctx context.Context, network string, address string) (net.Conn, error) {
@@ -82,6 +43,9 @@ func (l *Listener) DialContext(dialer net.Dialer, ctx context.Context, network s
 }
 
 func (l *Listener) ListenPacket(listenConfig net.ListenConfig, ctx context.Context, network string, address string) (net.PacketConn, error) {
+	if strings.HasPrefix(network, N.NetworkUDP) {
+		return nil, C.ErrUDPDisabled
+	}
 	return ListenNetworkNamespace[net.PacketConn](l.ctx, l.listenOptions.NetNs, func() (net.PacketConn, error) {
 		if l.listenOptions.BindInterface != "" {
 			listenConfig.Control = control.Append(listenConfig.Control, control.BindToInterface(service.FromContext[adapter.NetworkManager](l.ctx).InterfaceFinder(), l.listenOptions.BindInterface, -1))

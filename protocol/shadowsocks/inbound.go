@@ -34,8 +34,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, E.New("users and destinations options must not be combined")
 	} else if options.Managed && (len(options.Users) > 0 || len(options.Destinations) > 0) {
 		return nil, E.New("users and destinations options are not supported in managed servers")
+	} else if options.ObfsMu != "" && len(options.Destinations) > 0 {
+		return nil, E.New("obfs_mu and destinations options must not be combined")
 	}
-	if len(options.Users) > 0 || options.Managed {
+	if len(options.Users) > 0 || options.Managed || options.ObfsMu != "" {
 		return newMultiInbound(ctx, router, logger, tag, options)
 	} else if len(options.Destinations) > 0 {
 		return newRelayInbound(ctx, router, logger, tag, options)
@@ -73,15 +75,10 @@ func newInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	switch {
-	case options.Method == shadowsocks.MethodNone:
-		inbound.service = shadowsocks.NewNoneService(int64(udpTimeout.Seconds()), adapter.NewLegacyUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound))
-	case common.Contains(shadowaead.List, options.Method):
-		inbound.service, err = shadowaead.NewService(options.Method, nil, options.Password, int64(udpTimeout.Seconds()), adapter.NewLegacyUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound))
-	case common.Contains(shadowaead_2022.List, options.Method):
-		inbound.service, err = shadowaead_2022.NewServiceWithPassword(options.Method, options.Password, int64(udpTimeout.Seconds()), adapter.NewLegacyUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound), ntp.TimeFuncFromContext(ctx))
-	default:
-		err = E.New("unsupported method: ", options.Method)
+	inbound.service, err = newSingleService(ctx, options, udpTimeout,
+		adapter.NewLegacyUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound))
+	if err != nil {
+		return nil, err
 	}
 	inbound.listener = listener.New(listener.Options{
 		Context:                  ctx,
@@ -92,7 +89,23 @@ func newInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		PacketHandler:            inbound,
 		ThreadUnsafePacketWriter: true,
 	})
-	return inbound, err
+	return inbound, nil
+}
+
+func newSingleService(ctx context.Context, options option.ShadowsocksInboundOptions,
+	udpTimeout time.Duration, handler shadowsocks.Handler,
+) (shadowsocks.Service, error) {
+	switch {
+	case options.Method == shadowsocks.MethodNone:
+		return shadowsocks.NewNoneService(int64(udpTimeout.Seconds()), handler), nil
+	case common.Contains(shadowaead.List, options.Method):
+		return shadowaead.NewService(options.Method, nil, options.Password, int64(udpTimeout.Seconds()), handler)
+	case common.Contains(shadowaead_2022.List, options.Method):
+		return shadowaead_2022.NewServiceWithPassword(options.Method, options.Password,
+			int64(udpTimeout.Seconds()), handler, ntp.TimeFuncFromContext(ctx))
+	default:
+		return nil, E.New("unsupported method: ", options.Method)
+	}
 }
 
 func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {

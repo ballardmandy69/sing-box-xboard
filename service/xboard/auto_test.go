@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -11,10 +13,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -145,11 +149,13 @@ type lifecycleOptions struct {
 // @date 2026-10-29
 type lifecycleInbound struct {
 	inbound.Adapter
-	options lifecycleOptions
-	stages  []adapter.StartStage
-	closed  bool
-	tracker adapter.SSMTracker
-	users   []string
+	options     lifecycleOptions
+	stages      []adapter.StartStage
+	closed      bool
+	tracker     adapter.SSMTracker
+	users       []string
+	hotUsers    []string
+	hotCallback func(string)
 }
 
 func (i *lifecycleInbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
@@ -169,11 +175,64 @@ func (i *lifecycleInbound) UpdateUsers(users, credentials []string) error {
 		return errors.New("injected user update failure")
 	}
 	i.users = append([]string(nil), users...)
+	i.hotUsers = nil
 	return nil
 }
 
-func lifecycleWrapper(t *testing.T) *autoInbound {
-	t.Helper()
+func (i *lifecycleInbound) UpdateHotUsers(users []string) {
+	i.hotUsers = append([]string(nil), users...)
+}
+
+func (i *lifecycleInbound) SetHotUserCallback(callback func(string)) {
+	i.hotCallback = callback
+}
+
+func TestAutoInboundPreservesHotUsers(t *testing.T) {
+	logger := log.NewNOPFactory().Logger()
+	h := newEmptyAutoInbound(context.Background(), lifecycleRegistry(), nil, logger, "deferred", "test")
+	if err := h.UpdateUsers([]string{"alpha", "bravo"}, []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	hot := []string{"bravo"}
+	h.UpdateHotUsers(hot)
+	hot[0] = "mutated"
+	var notified string
+	h.SetHotUserCallback(func(name string) { notified = name })
+	config := autoInboundConfig{protocol: "test", options: &lifecycleOptions{},
+		endpoint: netip.MustParseAddrPort("127.0.0.1:8443")}
+	if err := h.replace(config); err != nil {
+		t.Fatal(err)
+	}
+	check := func() {
+		t.Helper()
+		current := h.current.inbound.(*lifecycleInbound)
+		if !reflect.DeepEqual(current.hotUsers, []string{"bravo"}) || current.hotCallback == nil {
+			t.Fatal("cached hot users or callback lost")
+		}
+		current.hotCallback("bravo")
+		if notified != "bravo" {
+			t.Fatal("hot callback was not forwarded")
+		}
+	}
+	check()
+	if err := h.UpdateUsers([]string{"bravo", "alpha"}, []string{"b", "a"}); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	config.endpoint = netip.MustParseAddrPort("127.0.0.1:9443")
+	if err := h.replace(config); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	h.UpdateHotUsers(nil)
+	h.SetHotUserCallback(nil)
+	current := h.current.inbound.(*lifecycleInbound)
+	if len(current.hotUsers) != 0 || current.hotCallback != nil {
+		t.Fatal("hot users/callback clearing was not forwarded")
+	}
+}
+
+func lifecycleRegistry() *inbound.Registry {
 	registry := inbound.NewRegistry()
 	inbound.Register[lifecycleOptions](registry, "test", func(_ context.Context, _ adapter.Router,
 		_ log.ContextLogger, tag string, options lifecycleOptions,
@@ -183,6 +242,12 @@ func lifecycleWrapper(t *testing.T) *autoInbound {
 		}
 		return &lifecycleInbound{Adapter: inbound.NewAdapter("test", tag), options: options}, nil
 	})
+	return registry
+}
+
+func lifecycleWrapper(t *testing.T) *autoInbound {
+	t.Helper()
+	registry := lifecycleRegistry()
 	logger := log.NewNOPFactory().Logger()
 	h, err := newAutoInbound(context.Background(), registry, nil, logger, "auto-test", autoInboundConfig{
 		protocol: "test", options: &lifecycleOptions{Revision: 1}, endpoint: netip.MustParseAddrPort("127.0.0.1:8443"),
@@ -203,6 +268,159 @@ func lifecycleWrapper(t *testing.T) *autoInbound {
 		}
 	}
 	return h
+}
+
+func TestAutoInboundDeferredRegistration(t *testing.T) {
+	var requests atomic.Int32
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer panel.Close()
+	manager := inbound.NewManager(nil, endpoint.NewManager(nil))
+	ctx := service.ContextWith[adapter.InboundManager](context.Background(), manager)
+	ctx = service.ContextWith[adapter.InboundRegistry](ctx, inbound.NewRegistry())
+	ctx = service.ContextWith[adapter.Router](ctx, struct{ adapter.Router }{})
+	created, err := NewService(ctx, log.NewNOPFactory().Logger(), "panel", option.XBoardServiceOptions{
+		APIHost: panel.URL, APIKey: "test-token", NodeID: 1, NodeType: "anytls", Inbound: "deferred",
+		AutoInbound: &option.XBoardAutoInboundOptions{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := created.(*Service).nodes[0]
+	t.Cleanup(func() { n.auto.close() })
+	registered, exists := manager.Get("deferred")
+	if !exists || registered != n.auto || n.inbound != n.auto || registered.Type() != "anytls" {
+		t.Fatal("automatic inbound did not retain one stable manager registration")
+	}
+	if requests.Load() != 0 || n.configETag != "" || n.auto.hasCurrent() {
+		t.Fatal("registration fetched or applied panel configuration before initial synchronization")
+	}
+	if n.auto.tracker != n.control {
+		t.Fatal("deferred holder lost its traffic tracker")
+	}
+}
+
+func TestAutoInboundDeferredActivation(t *testing.T) {
+	logger := log.NewNOPFactory().Logger()
+	h := newEmptyAutoInbound(context.Background(), lifecycleRegistry(), nil, logger, "deferred", "test")
+	scope := adapter.NewScope(context.Background(), logger)
+	t.Cleanup(func() { scope.Close() })
+	tracker := ssmapi.NewTrafficManager()
+	h.SetTracker(tracker)
+	users, credentials := []string{"initial"}, []string{"credential"}
+	if err := h.UpdateUsers(users, credentials); err != nil {
+		t.Fatal(err)
+	}
+	users[0], credentials[0] = "mutated", "mutated"
+	if err := h.UpdateUsers([]string{"bad"}, nil); err == nil {
+		t.Fatal("deferred holder accepted mismatched users and credentials")
+	}
+	for _, stage := range adapter.ListStartStages {
+		if err := h.Start(stage, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h.hasCurrent() {
+		t.Fatal("empty holder unexpectedly enabled a listener")
+	}
+	config := autoInboundConfig{protocol: "test", options: &lifecycleOptions{},
+		endpoint: netip.MustParseAddrPort("127.0.0.1:8443")}
+	if err := h.replace(config); err != nil {
+		t.Fatal(err)
+	}
+	current := h.current.inbound.(*lifecycleInbound)
+	if !h.hasCurrent() || !reflect.DeepEqual(current.stages, adapter.ListStartStages) ||
+		current.tracker != tracker || !reflect.DeepEqual(current.users, []string{"initial"}) ||
+		!reflect.DeepEqual(h.credentials, []string{"credential"}) {
+		t.Fatal("first listener did not inherit cached users, tracker and completed lifecycle stages")
+	}
+	if err := h.replace(config); err != nil || h.current.inbound != current {
+		t.Fatal("unchanged first configuration unnecessarily replaced the listener")
+	}
+	if err := scope.Close(); err != nil || !current.closed || h.hasCurrent() {
+		t.Fatal("parent scope did not close the deferred listener")
+	}
+}
+
+func TestAutoInboundDeferredFailuresRemainRetryable(t *testing.T) {
+	for _, failure := range []lifecycleOptions{{FailMake: true}, {FailUsers: true}, {FailStart: true}} {
+		t.Run(fmt.Sprint(failure), func(t *testing.T) {
+			logger := log.NewNOPFactory().Logger()
+			h := newEmptyAutoInbound(context.Background(), lifecycleRegistry(), nil, logger, "retry", "test")
+			scope := adapter.NewScope(context.Background(), logger)
+			t.Cleanup(func() { scope.Close() })
+			if err := h.Start(adapter.StartStateStart, scope); err != nil {
+				t.Fatal(err)
+			}
+			config := autoInboundConfig{protocol: "test", options: &failure,
+				endpoint: netip.MustParseAddrPort("127.0.0.1:8443")}
+			if err := h.replace(config); err == nil || h.hasCurrent() {
+				t.Fatal("failed first configuration was published")
+			} else if errors.Is(err, errCachedUsersInvalid) != failure.FailUsers {
+				t.Fatalf("initial failure was assigned the wrong recovery phase: %v", err)
+			}
+			config.options = &lifecycleOptions{}
+			if err := h.replace(config); err != nil || !h.hasCurrent() {
+				t.Fatalf("initial failure prevented a later successful activation: %v", err)
+			}
+		})
+	}
+}
+
+func TestAutoInboundEmptyClose(t *testing.T) {
+	logger := log.NewNOPFactory().Logger()
+	h := newEmptyAutoInbound(context.Background(), lifecycleRegistry(), nil, logger, "empty", "test")
+	if err := h.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.close(); err != nil || h.hasCurrent() {
+		t.Fatal("closing an empty holder was not idempotent")
+	}
+	h.SetTracker(ssmapi.NewTrafficManager())
+	if err := h.UpdateUsers(nil, nil); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed empty holder accepted users: %v", err)
+	}
+	if err := h.replace(autoInboundConfig{}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed empty holder accepted a listener: %v", err)
+	}
+	scope := adapter.NewScope(context.Background(), logger)
+	defer scope.Close()
+	if err := h.Start(adapter.StartStateStart, scope); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed empty holder accepted a lifecycle stage: %v", err)
+	}
+}
+
+func TestAutoInboundActivationDuringStartStages(t *testing.T) {
+	logger := log.NewNOPFactory().Logger()
+	h := newEmptyAutoInbound(context.Background(), lifecycleRegistry(), nil, logger, "starting", "test")
+	scope := adapter.NewScope(context.Background(), logger)
+	t.Cleanup(func() { scope.Close() })
+	if err := h.Start(adapter.StartStateInitialize, scope); err != nil {
+		t.Fatal(err)
+	}
+	config := autoInboundConfig{protocol: "test", options: &lifecycleOptions{},
+		endpoint: netip.MustParseAddrPort("127.0.0.1:8443")}
+	results := make(chan error, 2)
+	go func() { results <- h.replace(config) }()
+	go func() {
+		for _, stage := range adapter.ListStartStages {
+			if err := h.Start(stage, scope); err != nil {
+				results <- err
+				return
+			}
+		}
+		results <- nil
+	}()
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(h.current.inbound.(*lifecycleInbound).stages, adapter.ListStartStages) {
+		t.Fatal("concurrent first activation duplicated or omitted a lifecycle stage")
+	}
 }
 
 func TestAutoInboundReplacementLifecycle(t *testing.T) {
@@ -252,7 +470,7 @@ func TestXBoardHTTPErrorRedactionAndStaticConfig(t *testing.T) {
 		w.Write([]byte(`{"server_port":false,"base_config":{"pull_interval":7},"error":"response-secret"}`))
 	}))
 	defer panel.Close()
-	n := &node{service: &Service{client: panel.Client()}, apiHost: panel.URL, apiKey: "query-secret"}
+	n := &node{service: &Service{}, primary: fixturePanel(panel, "test", "query-secret")}
 	if err := n.syncConfig(context.Background()); err == nil || strings.Contains(err.Error(), "secret") ||
 		strings.Contains(err.Error(), panel.URL) {
 		t.Fatalf("HTTP failure was not redacted: %v", err)

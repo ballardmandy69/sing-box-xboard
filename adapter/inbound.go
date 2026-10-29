@@ -54,6 +54,8 @@ type InboundContext struct {
 	User        string
 	Outbound    string
 
+	LegacyInboundOptions option.InboundOptions
+
 	// power report
 
 	RouteRule     string

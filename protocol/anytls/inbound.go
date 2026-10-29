@@ -273,7 +273,12 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}
 	if state := h.tracker.Load(); state != nil && state.tracker != nil {
-		conn = state.tracker.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, state.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)

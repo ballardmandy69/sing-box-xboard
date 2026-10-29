@@ -142,11 +142,11 @@ func TestStandardTLSXBoardUserUpdates(t *testing.T) {
 			if err = nativeExchangeOnConn(alphaConn, 1024); err != nil {
 				t.Fatalf("initial alpha TCP exchange: %v", err)
 			}
-			standardAssertRouteUser(t, tracker, alphaUUID)
+			standardAssertRouteUser(t, tracker, "101@panel@uniproxy")
 			if err = nativeExchange(bravoOutbound, destination, 2048); err != nil {
 				t.Fatalf("initial bravo TCP exchange: %v", err)
 			}
-			standardAssertRouteUser(t, tracker, bravoUUID)
+			standardAssertRouteUser(t, tracker, "202@panel@uniproxy")
 			totals := make(map[string][2]int64)
 			standardAwaitTraffic(t, pushes, totals, 1024, 2048)
 
@@ -158,7 +158,7 @@ func TestStandardTLSXBoardUserUpdates(t *testing.T) {
 			if err = nativeExchange(bravoOutbound, destination, 4096); err != nil {
 				t.Fatalf("new bravo stream after user reorder: %v", err)
 			}
-			standardAssertRouteUser(t, tracker, bravoUUID)
+			standardAssertRouteUser(t, tracker, "202@panel@uniproxy")
 			standardAwaitTraffic(t, pushes, totals, 4096, 6144)
 			alphaConn.Close()
 
@@ -173,7 +173,7 @@ func TestStandardTLSXBoardUserUpdates(t *testing.T) {
 			if err = nativeExchange(bravoOutbound, destination, 8192); err != nil {
 				t.Fatalf("retained bravo user after deletion: %v", err)
 			}
-			standardAssertRouteUser(t, tracker, bravoUUID)
+			standardAssertRouteUser(t, tracker, "202@panel@uniproxy")
 			standardAwaitTraffic(t, pushes, totals, 4096, 14336)
 			select {
 			case <-tracker.events:

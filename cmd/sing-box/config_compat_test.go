@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
@@ -17,15 +18,21 @@ import (
 func TestNormalizeLegacyServerConfig(t *testing.T) {
 	value := map[string]any{
 		"DisableAccessLog": true,
+		"IPLimit":          5,
+		"ConnectionLimit":  20,
+		"RateLimit":        30,
+		"MaxSpeedLimit":    "100 Mbps",
 		"Nodes": []any{map[string]any{
 			"UpdateInterval": "60s",
+			"MaxSpeedLimit":  "20 Mbps",
 			"ApiConfig": map[string]any{
-				"PanelTag": "vless-1",
-				"ApiHost":  "https://panel.example",
-				"ApiKey":   "secret",
-				"NodeType": "VLESS",
-				"NodeID":   float64(12),
-				"Timeout":  float64(10),
+				"PanelTag":    "vless-1",
+				"ApiHost":     "https://panel.example",
+				"ApiKey":      "secret",
+				"NodeType":    "VLESS",
+				"NodeID":      float64(12),
+				"Timeout":     float64(10),
+				"ReportAlive": true,
 			},
 		}},
 	}
@@ -38,8 +45,17 @@ func TestNormalizeLegacyServerConfig(t *testing.T) {
 	if service["node_type"] != "vless" || service["node_id"] != 12 || service["timeout"] != "10s" {
 		t.Fatalf("unexpected API mapping: %#v", service)
 	}
-	if result["log"].(map[string]any)["disabled"] != true {
-		t.Fatal("DisableAccessLog was not mapped")
+	if service["ip_limit"] != 5 || service["connection_limit"] != 20 || service["rate_limit"] != 30 {
+		t.Fatal("global per-user connection limits were discarded")
+	}
+	if service["max_speed_limit"] != "20 Mbps" || service["default_max_speed_limit"] != "100 Mbps" {
+		t.Fatal("node and global bandwidth caps were combined before applying their fallback semantics")
+	}
+	if service["report_alive"] != true || service["sync_interval"] != "60s" {
+		t.Fatal("online reporting or legacy scheduling options were discarded")
+	}
+	if result["nyafw"].(map[string]any)["access_log"] != 2 || result["log"] != nil {
+		t.Fatal("DisableAccessLog must disable access capture without muting process logs")
 	}
 }
 
@@ -126,6 +142,102 @@ func TestLegacyStaticInbound(t *testing.T) {
 	service := result["services"].([]any)[0].(map[string]any)
 	if _, exists := service["auto_inbound"]; exists {
 		t.Fatal("StaticInbound must require an existing manually configured inbound")
+	}
+}
+
+func TestLegacyMultiPanelConfiguration(t *testing.T) {
+	previousContext := globalCtx
+	globalCtx = include.Context(context.Background())
+	t.Cleanup(func() { globalCtx = previousContext })
+	content := []byte(`IPLimit: 65535
+ConnectionLimit: 4294967295
+RateLimit: 18446744073709551615
+MaxSpeedLimit: 100 Mbps
+Nodes:
+  - Type: multi
+    ListenIP: 192.0.2.10
+    UpdateInterval: 12s
+    MaxSpeedLimit: 20 Mbps
+    MultiApiConfig:
+      - Type: UniProxy
+        PanelTag: first
+        ApiHost: https://first.example
+        ApiKey: test-key-a
+        NodeID: 1
+        NodeType: Anytls
+      - Type: UniProxy
+        PanelTag: second
+        ApiHost: https://second.example
+        ApiKey: test-key-b
+        NodeID: 2
+        NodeType: Anytls
+        Timeout: 3
+`)
+	path := filepath.Join(t.TempDir(), "multi.yml")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := readConfigAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := entry.options.Services[0].Options.(*option.XBoardServiceOptions)
+	if len(options.Panels) != 2 || options.Panels[0].PanelTag != "first" ||
+		options.Panels[1].PanelTag != "second" || options.Panels[1].NodeID != 2 ||
+		options.Panels[1].NodeType != "anytls" || options.NodeType != "anytls" {
+		t.Fatal("multi panel sources were discarded or conflated")
+	}
+	if options.SyncInterval == nil || time.Duration(*options.SyncInterval) != 12*time.Second ||
+		time.Duration(options.Panels[1].Timeout) != 3*time.Second || options.AutoInbound.Listen != "192.0.2.10" {
+		t.Fatal("multi panel listener or independent timing settings were discarded")
+	}
+	if options.IPLimit != 65535 || options.ConnectionLimit != 4294967295 ||
+		options.RateLimit != 18446744073709551615 || options.MaxSpeedLimit != "20 Mbps" ||
+		options.DefaultMaxSpeedLimit != "100 Mbps" {
+		t.Fatal("legacy unsigned limit widths or node/global speed settings were truncated")
+	}
+	encoded, err := entry.options.Services[0].MarshalJSONContext(globalCtx)
+	if err != nil || !bytes.Contains(encoded, []byte("18446744073709551615")) {
+		t.Fatal("formatting a service lost the exact unsigned limit")
+	}
+}
+
+func TestMultiActivationUsesEffectiveApiType(t *testing.T) {
+	for _, test := range []struct {
+		nodeType, apiType string
+		multi             bool
+	}{
+		{"multi", "", true}, {"UniProxy", "multi", true}, {"multi", "UniProxy", false},
+		{"UniProxy", "", false},
+	} {
+		value := map[string]any{"Nodes": []any{map[string]any{
+			"Type": test.nodeType, "ApiConfig": map[string]any{"Type": test.apiType},
+			"MultiApiConfig": []any{map[string]any{"Type": "UniProxy", "PanelTag": "child"}},
+		}}}
+		if err := validateLegacyNodes(value); err != nil {
+			t.Fatal(err)
+		}
+		result := normalizeLegacyServerConfig(value).(map[string]any)
+		service := result["services"].([]any)[0].(map[string]any)
+		if _, multi := service["panels"]; multi != test.multi {
+			t.Fatalf("ApiConfig.Type inheritance was not preserved: %+v", test)
+		}
+	}
+}
+
+func TestLegacyTrafficFactorInheritance(t *testing.T) {
+	for _, test := range []struct{ node, want float64 }{{0, 1.5}, {-2, 1.5}, {2, 2}} {
+		value := map[string]any{"TrafficFactor": 1.5, "Nodes": []any{map[string]any{
+			"TrafficFactor": test.node, "ApiConfig": map[string]any{},
+		}}}
+		result := normalizeLegacyServerConfig(value).(map[string]any)
+		service := result["services"].([]any)[0].(map[string]any)
+		if service["traffic_factor"] != test.want {
+			t.Fatal("nonpositive node TrafficFactor must inherit the global factor")
+		}
+		if _, exists := result["TrafficFactor"]; exists {
+			t.Fatal("legacy root factor remained after conversion")
+		}
 	}
 }
 

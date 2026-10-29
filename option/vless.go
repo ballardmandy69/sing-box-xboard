@@ -3,6 +3,8 @@ package option
 type VLESSInboundOptions struct {
 	ListenOptions
 	Users []VLESSUser `json:"users,omitempty"`
+	// A non-nil value enables the legacy node-level flow policy instead of per-user flow matching.
+	ForceVision *bool `json:"force_vision,omitempty"`
 	InboundTLSOptionsContainer
 	Multiplex *InboundMultiplexOptions `json:"multiplex,omitempty"`
 	Transport *V2RayTransportOptions   `json:"transport,omitempty"`

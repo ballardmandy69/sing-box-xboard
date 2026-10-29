@@ -16,10 +16,11 @@ import (
 )
 
 type RawDNSOptions struct {
-	Servers        []DNSServerOptions `json:"servers,omitempty"`
-	Rules          []DNSRule          `json:"rules,omitempty"`
-	Final          string             `json:"final,omitempty" reference:"dns_server"`
-	ReverseMapping bool               `json:"reverse_mapping,omitempty"`
+	Servers        []DNSServerOptions      `json:"servers,omitempty"`
+	Rules          []DNSRule               `json:"rules,omitempty"`
+	Final          string                  `json:"final,omitempty" reference:"dns_server"`
+	ReverseMapping bool                    `json:"reverse_mapping,omitempty"`
+	FakeIP         *LegacyDNSFakeIPOptions `json:"fakeip,omitempty"`
 	DNSClientOptions
 }
 
@@ -27,25 +28,17 @@ type DNSOptions struct {
 	RawDNSOptions
 }
 
-const (
-	legacyDNSFakeIPRemovedMessage = "legacy DNS fakeip options are deprecated in sing-box 1.12.0 and removed in sing-box 1.14.0, checkout migration: https://sing-box.sagernet.org/migration/#migrate-to-new-dns-server-formats"
-	legacyDNSServerRemovedMessage = "legacy DNS server formats are deprecated in sing-box 1.12.0 and removed in sing-box 1.14.0, checkout migration: https://sing-box.sagernet.org/migration/#migrate-to-new-dns-server-formats"
-)
-
-type removedLegacyDNSOptions struct {
-	FakeIP json.RawMessage `json:"fakeip,omitempty"`
+// LegacyDNSFakeIPOptions configures the original shared FakeIP store.
+// @author lyt
+// @date 2026-10-29
+type LegacyDNSFakeIPOptions struct {
+	Enabled    bool              `json:"enabled,omitempty"`
+	Inet4Range *badoption.Prefix `json:"inet4_range,omitempty"`
+	Inet6Range *badoption.Prefix `json:"inet6_range,omitempty"`
 }
 
 func (o *DNSOptions) UnmarshalJSONContext(ctx context.Context, content []byte) error {
-	var legacyOptions removedLegacyDNSOptions
-	err := json.UnmarshalContext(ctx, content, &legacyOptions)
-	if err != nil {
-		return err
-	}
-	if len(legacyOptions.FakeIP) != 0 {
-		return E.New(legacyDNSFakeIPRemovedMessage)
-	}
-	return badjson.UnmarshallExcludedContext(ctx, content, legacyOptions, &o.RawDNSOptions)
+	return json.UnmarshalContextDisallowUnknownFields(ctx, content, &o.RawDNSOptions)
 }
 
 func (o DNSOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
@@ -113,6 +106,18 @@ type _DNSServerOptions struct {
 
 type DNSServerOptions _DNSServerOptions
 
+// LegacyDNSServerOptions preserves the original address-based DNS configuration.
+// @author lyt
+// @date 2026-10-29
+type LegacyDNSServerOptions struct {
+	Address              string             `json:"address"`
+	AddressResolver      string             `json:"address_resolver,omitempty" reference:"dns_server"`
+	AddressStrategy      DomainStrategy     `json:"address_strategy,omitempty"`
+	AddressFallbackDelay badoption.Duration `json:"address_fallback_delay,omitempty"`
+	Strategy             DomainStrategy     `json:"strategy,omitempty"`
+	Detour               string             `json:"detour,omitempty" reference:"outbound"`
+}
+
 func (o *DNSServerOptions) MarshalJSONContext(ctx context.Context) ([]byte, error) {
 	return badjson.MarshallObjectsContext(ctx, (*_DNSServerOptions)(o), o.Options)
 }
@@ -129,7 +134,7 @@ func (o *DNSServerOptions) UnmarshalJSONContext(ctx context.Context, content []b
 	var options any
 	switch o.Type {
 	case "", C.DNSTypeLegacy:
-		return E.New(legacyDNSServerRemovedMessage)
+		options = new(LegacyDNSServerOptions)
 	default:
 		var loaded bool
 		options, loaded = registry.CreateOptions(o.Type)
@@ -211,6 +216,7 @@ type RemoteHTTPSDNSServerOptions struct {
 type FakeIPDNSServerOptions struct {
 	Inet4Range *badoption.Prefix `json:"inet4_range,omitempty" examples:"198.18.0.0/15"`
 	Inet6Range *badoption.Prefix `json:"inet6_range,omitempty" examples:"fc00::/18"`
+	Legacy     bool              `json:"-"`
 }
 
 type DHCPDNSServerOptions struct {

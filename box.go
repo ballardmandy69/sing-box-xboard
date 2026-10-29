@@ -108,6 +108,9 @@ func Context(
 }
 
 func New(options Options) (*Box, error) {
+	if err := validateTCPOnlyProxies(options.Options); err != nil {
+		return nil, err
+	}
 	createdAt := time.Now()
 	ctx := options.Context
 	if ctx == nil {
@@ -185,6 +188,13 @@ func New(options Options) (*Box, error) {
 	service.MustRegister[log.Factory](ctx, logFactory)
 
 	var internalServices []adapter.LifecycleService
+	if options.NYAFW != nil {
+		runtime, runtimeErr := newNYAFWRuntime(ctx, logFactory.NewLogger("nyafw"), *options.NYAFW)
+		if runtimeErr != nil {
+			return nil, runtimeErr
+		}
+		internalServices = append(internalServices, runtime)
+	}
 	routeOptions := common.PtrValueOrDefault(options.Route)
 	certificateOptions := common.PtrValueOrDefault(options.Certificate)
 	if C.IsAndroid || certificateOptions.Store != "" && certificateOptions.Store != C.CertificateStoreSystem ||

@@ -229,7 +229,7 @@ func autoAwait(t *testing.T, ready func() bool, reason string) {
 	t.Fatalf("timed out waiting for %s", reason)
 }
 
-func TestAutoXBoardInitialFailureRejectsConfiguration(t *testing.T) {
+func TestAutoXBoardInitialFailureKeepsListenerClosed(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		status int
@@ -246,7 +246,13 @@ func TestAutoXBoardInitialFailureRejectsConfiguration(t *testing.T) {
 			auto: map[string]any{"protocol": "anytls-native", "private_key": "invalid-key-material"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			var configRequests atomic.Int64
 			panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/user") {
+					w.Write([]byte(`{"users":[{"id":1,"uuid":"test-credential"}]}`))
+					return
+				}
+				configRequests.Add(1)
 				w.WriteHeader(test.status)
 				w.Write([]byte(test.body))
 			}))
@@ -254,6 +260,8 @@ func TestAutoXBoardInitialFailureRejectsConfiguration(t *testing.T) {
 			if test.auto == nil {
 				test.auto = map[string]any{}
 			}
+			port := nativeFreePort(t)
+			test.auto["listen"], test.auto["listen_port"] = "127.0.0.1", port
 			encoded, err := json.Marshal(map[string]any{
 				"log":       map[string]any{"disabled": true},
 				"outbounds": []any{map[string]any{"type": "direct"}},
@@ -273,13 +281,80 @@ func TestAutoXBoardInitialFailureRejectsConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 			instance, err := box.New(box.Options{Context: ctx, Options: options})
-			if err == nil {
-				instance.Close()
-				t.Fatal("invalid initial automatic node was accepted")
+			if err != nil {
+				t.Fatalf("automatic node should defer remote availability to startup: %v", err)
 			}
-			if strings.Contains(err.Error(), "private-token") || strings.Contains(err.Error(), panel.URL) {
-				t.Fatal("initial panel failure exposed request or response secrets")
+			defer instance.Close()
+			if configRequests.Load() != 0 {
+				t.Fatal("constructing an automatic node performed a remote request")
+			}
+			if err = instance.Start(); err != nil {
+				t.Fatal(err)
+			}
+			autoAwait(t, func() bool { return configRequests.Load() >= 2 }, "failed initial configuration to retry")
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), time.Second)
+			if err == nil {
+				conn.Close()
+				t.Fatal("failed initial configuration opened its listener")
 			}
 		})
+	}
+}
+
+func TestAutoXBoardRecoversFromUnavailablePanel(t *testing.T) {
+	privateKey, publicKey := nativeTestKeys(t)
+	port := nativeFreePort(t)
+	var available atomic.Bool
+	var attempts atomic.Int64
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/user"):
+			w.Write([]byte(`{"users":[{"id":1,"uuid":"test-credential"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			attempts.Add(1)
+			if !available.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"server_port": port, "protocol": "anytls"})
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer panel.Close()
+	tracker := &nativeRouteTracker{events: make(chan nativeRouteEvent, 8)}
+	nativeStartBox(t, map[string]any{
+		"outbounds": []any{map[string]any{"type": "direct"}},
+		"services": []any{map[string]any{
+			"type": "xboard", "tag": "panel", "inbound": "auto-in", "node_id": 1,
+			"api_host": panel.URL, "api_key": "test-token", "node_type": "anytls",
+			"auto_inbound": map[string]any{
+				"protocol": "anytls-native", "listen": "127.0.0.1", "private_key": privateKey,
+			},
+		}},
+	}, tracker)
+	autoAwait(t, func() bool { return attempts.Load() > 0 }, "initial unavailable panel request")
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+		conn.Close()
+		t.Fatal("automatic listener opened before obtaining its node configuration")
+	}
+	available.Store(true)
+	autoAwait(t, func() bool {
+		conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}, "automatic listener after the panel recovers")
+	client := nativeStartBox(t, map[string]any{"outbounds": []any{
+		nativeClientConfig(port, publicKey, "native", "test-credential"),
+	}}, nil)
+	if err := nativeExchange(nativeGetOutbound(t, client, "native"), nativeEchoServer(t), 1024); err != nil {
+		t.Fatalf("recovered node did not apply its cached users: %v", err)
+	}
+	if event := nativeNextRoute(t, tracker); event.user != "1@panel@uniproxy" {
+		t.Fatal("recovered node lost its stable accounting identity")
 	}
 }

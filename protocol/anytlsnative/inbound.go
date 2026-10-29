@@ -301,7 +301,12 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn,
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	if state := h.tracker.Load(); state != nil && state.tracker != nil {
-		conn = state.tracker.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, state.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)

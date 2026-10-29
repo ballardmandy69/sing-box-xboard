@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"net/netip"
 	"os"
 	"strconv"
@@ -34,6 +33,13 @@ type autoConfigResponse struct {
 	TLSSettings     json.RawMessage `json:"tls_settings"`
 	ServerName      string          `json:"server_name"`
 	PaddingScheme   json.RawMessage `json:"padding_scheme"`
+	Cipher          string          `json:"cipher"`
+	ServerKey       string          `json:"server_key"`
+	Obfs            string          `json:"obfs"`
+	ObfsSettings    json.RawMessage `json:"obfs_settings"`
+	Plugin          string          `json:"plugin"`
+	PluginOptions   json.RawMessage `json:"plugin_opts"`
+	Decryption      json.RawMessage `json:"decryption"`
 }
 
 func (n *node) createInbound(ctx context.Context, manager adapter.InboundManager, tag string,
@@ -43,18 +49,7 @@ func (n *node) createInbound(ctx context.Context, manager adapter.InboundManager
 	if router == nil {
 		return nil, fmt.Errorf("missing router for automatic xboard inbound")
 	}
-	body, status, etag, err := n.request(ctx, http.MethodGet, "config", "", nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("initial xboard config must return HTTP 200")
-	}
-	var response autoConfigResponse
-	if err = json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("invalid xboard node configuration response")
-	}
-	config, err := response.buildInboundConfig(n.nodeType, auto)
+	protocol, err := automaticProtocol(n.nodeType, auto)
 	if err != nil {
 		return nil, err
 	}
@@ -62,19 +57,15 @@ func (n *node) createInbound(ctx context.Context, manager adapter.InboundManager
 	if registry == nil {
 		return nil, fmt.Errorf("missing inbound registry for automatic xboard inbound")
 	}
-	created, err := newAutoInbound(ctx, registry, router, n.service.logger, tag, config)
-	if err != nil {
-		return nil, err
-	}
+	created := newEmptyAutoInbound(ctx, registry, router, n.service.logger, tag, protocol)
 	if err = manager.Register(created); err != nil {
 		created.close()
 		return nil, err
 	}
 	n.auto = created
 	n.autoOptions = auto
-	n.applyConfigIntervals(response.configResponse)
-	n.configETag = etag
-	n.service.logger.Info("xboard created inbound: ", tag, " type=", config.protocol, " node=", n.nodeID)
+	n.service.logger.Info("xboard automatic inbound awaiting initial synchronization: ", tag,
+		" type=", protocol, " node=", n.nodeID)
 	return created, nil
 }
 
@@ -95,27 +86,21 @@ func (r autoConfigResponse) buildInboundConfig(nodeType string,
 func (r autoConfigResponse) inboundOptions(nodeType string,
 	auto option.XBoardAutoInboundOptions,
 ) (string, any, error) {
-	protocol := strings.ToLower(strings.TrimSpace(auto.Protocol))
-	if protocol == "" {
-		protocol = strings.ToLower(strings.TrimSpace(nodeType))
+	protocol, err := automaticProtocol(nodeType, auto)
+	if err != nil {
+		return "", nil, err
 	}
-	if protocol != C.TypeAnyTLS && protocol != C.TypeTrojan && protocol != C.TypeAnyTLSNative {
-		return "", nil, fmt.Errorf("automatic xboard inbounds support only anytls, trojan and anytls-native")
-	}
-	if r.Protocol != "" && !strings.EqualFold(strings.TrimSpace(r.Protocol), strings.TrimSpace(nodeType)) {
+	if r.Protocol != "" && normalizedProtocol(r.Protocol) != normalizedProtocol(nodeType) {
 		return "", nil, fmt.Errorf("xboard config protocol differs from the requested panel node type")
 	}
-	if r.Network != "" && !strings.EqualFold(strings.TrimSpace(r.Network), "tcp") {
-		return "", nil, fmt.Errorf("automatic xboard inbounds require raw TCP; websocket and gRPC are unsupported")
+	if protocol == C.TypeVLESS && nonemptyPanelOptions(r.Decryption) {
+		return "", nil, fmt.Errorf("automatic VLESS inbound does not support panel decryption settings")
 	}
-	if !emptyPanelValue(r.NetworkSettings) {
-		var settings map[string]json.RawMessage
-		if err := json.Unmarshal(r.NetworkSettings, &settings); err != nil || len(settings) != 0 {
-			return "", nil, fmt.Errorf("automatic raw TCP inbounds do not support networkSettings")
-		}
+	transport, err := r.transportOptions(protocol)
+	if err != nil {
+		return "", nil, err
 	}
 	port := auto.ListenPort
-	var err error
 	if port == 0 {
 		port, err = panelInteger(r.ServerPort)
 	}
@@ -139,6 +124,10 @@ func (r autoConfigResponse) inboundOptions(nodeType string,
 		ProxyProtocol: auto.ProxyProtocol, ProxyProtocolAcceptNoHeader: auto.ProxyProtocol,
 		AutoOutIP: auto.AutoOutIP,
 	}
+	if protocol == C.TypeShadowsocks {
+		options, err := r.shadowsocksOptions(listen, auto.ShadowsocksObfsMu)
+		return protocol, options, err
+	}
 	tlsOptions, err := r.tlsOptions(protocol, auto)
 	if err != nil {
 		return "", nil, err
@@ -156,6 +145,17 @@ func (r autoConfigResponse) inboundOptions(nodeType string,
 	case C.TypeTrojan:
 		return protocol, &option.TrojanInboundOptions{
 			ListenOptions: listen, InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: tlsOptions},
+			Transport: transport,
+		}, nil
+	case C.TypeVMess:
+		return protocol, &option.VMessInboundOptions{
+			ListenOptions: listen, InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: tlsOptions},
+			Transport: transport,
+		}, nil
+	case C.TypeVLESS:
+		return protocol, &option.VLESSInboundOptions{
+			ListenOptions: listen, InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: tlsOptions},
+			Transport: transport, ForceVision: &auto.ForceVision,
 		}, nil
 	default:
 		key, err := readNativePrivateKey(auto)
@@ -169,17 +169,33 @@ func (r autoConfigResponse) inboundOptions(nodeType string,
 	}
 }
 
+func automaticProtocol(nodeType string, auto option.XBoardAutoInboundOptions) (string, error) {
+	protocol := normalizedProtocol(auto.Protocol)
+	if protocol == "" {
+		protocol = normalizedProtocol(nodeType)
+	}
+	switch protocol {
+	case C.TypeAnyTLS, C.TypeTrojan, C.TypeAnyTLSNative, C.TypeVMess, C.TypeVLESS, C.TypeShadowsocks:
+		return protocol, nil
+	default:
+		return "", fmt.Errorf("unsupported automatic xboard inbound protocol")
+	}
+}
+
 func (r autoConfigResponse) tlsOptions(protocol string,
 	auto option.XBoardAutoInboundOptions,
 ) (*option.InboundTLSOptions, error) {
+	enabled := protocol == C.TypeAnyTLS || protocol == C.TypeTrojan ||
+		protocol == C.TypeAnyTLSNative && (auto.CertificatePath != "" || auto.KeyPath != "")
 	if !emptyPanelValue(r.TLS) {
 		mode, err := panelInteger(r.TLS)
 		if err != nil || mode < 0 || mode > 1 {
 			return nil, fmt.Errorf("automatic xboard inbounds do not support Reality or unknown TLS modes")
 		}
-		if mode == 0 && protocol != C.TypeAnyTLSNative {
+		if mode == 0 && (protocol == C.TypeAnyTLS || protocol == C.TypeTrojan) {
 			return nil, fmt.Errorf("automatic public anytls and trojan inbounds require TLS")
 		}
+		enabled = mode == 1
 	}
 	var settings map[string]json.RawMessage
 	if !emptyPanelValue(r.TLSSettings) {
@@ -200,7 +216,7 @@ func (r autoConfigResponse) tlsOptions(protocol string,
 			}
 		}
 	}
-	if auto.CertificatePath == "" && auto.KeyPath == "" && protocol == C.TypeAnyTLSNative {
+	if !enabled {
 		return nil, nil
 	}
 	if auto.CertificatePath == "" || auto.KeyPath == "" {

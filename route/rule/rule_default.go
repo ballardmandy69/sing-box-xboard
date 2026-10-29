@@ -122,13 +122,28 @@ func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options optio
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.Geosite) > 0 {
-		return nil, E.New("geosite database is deprecated in sing-box 1.8.0 and removed in sing-box 1.12.0")
+		item, err := NewLegacyGeositeItem(ctx, options.Geosite)
+		if err != nil {
+			return nil, E.Cause(err, "geosite")
+		}
+		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
+		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.SourceGeoIP) > 0 {
-		return nil, E.New("geoip database is deprecated in sing-box 1.8.0 and removed in sing-box 1.12.0")
+		item, err := NewLegacyGeoIPItem(ctx, options.SourceGeoIP, true)
+		if err != nil {
+			return nil, E.Cause(err, "source_geoip")
+		}
+		rule.sourceAddressItems = append(rule.sourceAddressItems, item)
+		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.GeoIP) > 0 {
-		return nil, E.New("geoip database is deprecated in sing-box 1.8.0 and removed in sing-box 1.12.0")
+		item, err := NewLegacyGeoIPItem(ctx, options.GeoIP, false)
+		if err != nil {
+			return nil, E.Cause(err, "geoip")
+		}
+		rule.destinationIPCIDRItems = append(rule.destinationIPCIDRItems, item)
+		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.SourceIPCIDR) > 0 {
 		item, err := NewIPCIDRItem(true, options.SourceIPCIDR)

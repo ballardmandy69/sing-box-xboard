@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/settings"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -79,24 +80,15 @@ func New(
 }
 
 func (l *Listener) Start() error {
+	if common.Contains(l.network, N.NetworkUDP) && !common.Contains(l.network, N.NetworkTCP) {
+		return C.ErrUDPDisabled
+	}
 	if common.Contains(l.network, N.NetworkTCP) {
 		_, err := l.ListenTCP()
 		if err != nil {
 			return err
 		}
 		go l.loopTCPIn()
-	}
-	if common.Contains(l.network, N.NetworkUDP) {
-		_, err := l.ListenUDP()
-		if err != nil {
-			return E.Errors(err, l.Close())
-		}
-		l.packetOutboundClosed = make(chan struct{})
-		l.packetOutbound = make(chan *N.PacketBuffer, 64)
-		go l.loopUDPIn()
-		if !l.disablePacketOutput {
-			go l.loopUDPOut()
-		}
 	}
 	if l.setSystemProxy {
 		listenPort := M.SocksaddrFromNet(l.tcpListener.Addr()).Port

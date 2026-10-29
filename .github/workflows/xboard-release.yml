@@ -24,6 +24,18 @@ jobs:
       - name: AnyTLS interoperability
         working-directory: third_party/sing-anytls
         run: go test -race ./... -count=1 -timeout=180s
+      - name: Restored TCP protocol and runtime behavior
+        run: |
+          go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... ./common/usercontrol ./service/ssmapi . -count=1 -timeout=180s
+          go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... ./common/usercontrol ./service/ssmapi . -count=1 -timeout=180s
+      - name: VMess authentication races
+        working-directory: third_party/sing-vmess
+        run: go test -race ./... -count=1 -timeout=180s
+      - name: OOM profile generation with default Go link checks
+        run: go test ./experimental/libbox/internal/oomprofile ./experimental/libbox ./experimental/boxdd -count=1 -timeout=90s
+      - name: Shadowsocks authentication races
+        working-directory: third_party/sing-shadowsocks
+        run: go test -race ./... -count=1 -timeout=180s
       - name: Installation and configuration smoke tests
         run: |
           go build -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
