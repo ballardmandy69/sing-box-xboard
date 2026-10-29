@@ -156,6 +156,20 @@ Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新�
 `codex/nyafw-full-parity` 中的当前源码已进一步接入下列能力，尚未发布对应版本；
 上文固定版本的安装命令仍安装 v2，不能把开发分支选项当作 v2 已有功能。
 
+开发分支验证安装使用同一提交的脚本、配置和内核。以下为 Bash + Go 1.26.5，适用于 Linux amd64：
+
+```bash
+git clone --branch codex/nyafw-full-parity --single-branch https://github.com/ballardmandy69/sing-box-xboard.git
+cd sing-box-xboard
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o sing-box ./cmd/sing-box
+bash release/package-xboard.sh "$PWD/sing-box" amd64 "$PWD/artifacts"
+cp artifacts/SHA256SUMS-amd64.txt artifacts/SHA256SUMS.txt
+sudo env RELEASE_DIR="$PWD/artifacts" bash ./install.sh
+```
+
+这是开发验证包；保留空 Nodes，安装后按前面的 YAML 添加节点并手工启动对应实例。
+原版运行验收完成前，发布页上的正式版本仍维持现有阶段版本。
+
 开发分支安装器在 `zq.key`、`zq.crt`、`zq.pem` 均不存在时，使用 OpenSSL 生成与原脚本一致的
 P-256、365 天、空 subject 自签证书；合并文件顺序为证书后接私钥，三个文件权限均为 `0600`。
 已有证书和私钥保持不变，仅缺 `zq.pem` 时从原文件重建；不完整的密钥/证书组合会明确报错。
@@ -207,6 +221,8 @@ MemoryGuard:
 `MD5(面板原始 UUID + MasterPassword)` 的小写十六进制，拼接不增加分隔符、不去除空白。
 组合 AnyTLS 入口的子协议使用同一个派生值。空 MasterPassword 使用原凭据；
 Native、VMess、独立 VLESS 和 Shadowsocks 保持各自的凭据处理。
+运行对照的原版 `20260920` 在派生认证成功后存在 gateway 用户查找失败；
+重建版保留原 UUID 与计费身份，使该选项正常工作。这个故障修复是明确记录的行为差异。
 
 `ShadowsocksBanIP` 可以设置在根级或节点级，两者取 OR。
 启用的传统 SS 多用户和 VMess 入口共用来源 IP 计数，第三次候选读取/认证失败后封禁，
