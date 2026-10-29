@@ -63,12 +63,13 @@ type InboundContext struct {
 
 	// sniffer
 
-	Protocol     string
-	Domain       string
-	Client       string
-	SniffContext any
-	SnifferNames []string
-	SniffError   error
+	Protocol       string
+	Domain         string
+	Client         string
+	SniffContext   any
+	SnifferNames   []string
+	SniffError     error
+	TLSFingerprint string
 
 	// cache
 

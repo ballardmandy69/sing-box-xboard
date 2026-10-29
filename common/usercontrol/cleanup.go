@@ -111,7 +111,7 @@ func (c *ConnectionCleaner) TrackConnection(conn net.Conn) net.Conn {
 }
 
 func (c *ConnectionCleaner) trackConnection(conn net.Conn, source string) net.Conn {
-	tracked := &cleanupConn{Conn: conn, cleaner: c}
+	tracked := &cleanupConn{Conn: conn, cleaner: c, kind: "tcp-unclassified"}
 	key := connectionKey(conn)
 	if !reflect.TypeOf(key).Comparable() {
 		// A non-comparable user supplied connection cannot be a Go map key.

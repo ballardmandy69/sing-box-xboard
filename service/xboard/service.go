@@ -13,6 +13,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	boxService "github.com/sagernet/sing-box/adapter/service"
+	"github.com/sagernet/sing-box/common/nodepolicy"
 	"github.com/sagernet/sing-box/common/usercontrol"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -32,12 +33,16 @@ func RegisterService(registry *boxService.Registry) {
 // @date 2026-10-25
 type Service struct {
 	boxService.Adapter
-	ctx    context.Context
-	logger log.ContextLogger
-	nodes  []*node
+	ctx          context.Context
+	logger       log.ContextLogger
+	policy       *nodepolicy.Registry
+	policyAccess sync.Mutex
+	policyClosed bool
+	nodes        []*node
 }
 
 type node struct {
+	debugTag        string
 	service         *Service
 	inbound         adapter.ManagedSSMServer
 	traffic         *ssmapi.TrafficManager
@@ -70,11 +75,12 @@ type node struct {
 }
 
 type panelUser struct {
-	ID              uint64 `json:"id"`
-	UUID            string `json:"uuid"`
-	SpeedLimit      int64  `json:"speed_limit,omitempty"`
-	DeviceLimit     int16  `json:"device_limit,omitempty"`
-	ConnectionLimit int32  `json:"connection_limit,omitempty"`
+	ID               uint64 `json:"id"`
+	UUID             string `json:"uuid"`
+	ProtocolPassword string `json:"-"`
+	SpeedLimit       int64  `json:"speed_limit,omitempty"`
+	DeviceLimit      int16  `json:"device_limit,omitempty"`
+	ConnectionLimit  int32  `json:"connection_limit,omitempty"`
 }
 
 type usersResponse struct {
@@ -132,6 +138,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		ctx:     ctx,
 		logger:  logger,
 	}
+	s.policy, _ = service.FromContext[adapter.ManagedNodePolicy](ctx).(*nodepolicy.Registry)
 	legacyOptions := service.PtrFromContext[option.NYAFWOptions](ctx)
 	var hotSeconds int64
 	if legacyOptions != nil {
@@ -163,8 +170,13 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		if err != nil {
 			return nil, err
 		}
-		nodeType = primary.client.options.NodeType
+		nodeType = primary.client.protocolType()
+		debugTag := primary.client.options.PanelTag
+		if options.LegacyPanelTag != nil {
+			debugTag = *options.LegacyPanelTag
+		}
 		node := &node{
+			debugTag:        debugTag,
 			service:         s,
 			traffic:         ssmapi.NewTrafficManager(),
 			limits:          make(map[string]usercontrol.Limits),
@@ -248,6 +260,14 @@ func checkInboundOwnership(ctx context.Context, current *Service, tag string) er
 }
 
 func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(s.closeNodePolicies)
+		for _, node := range s.nodes {
+			if err := node.syncNodePolicy(scope.Context()); err != nil {
+				return err
+			}
+		}
+	}
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -370,7 +390,8 @@ func (n *node) syncCycle(ctx context.Context) error {
 	// Account for the previous user set before applying removals or listener changes.
 	reportErr := n.pushReports(ctx)
 	userErr := n.syncUserList(ctx)
-	return errors.Join(reportErr, userErr, n.syncConfig(ctx))
+	statusErr := n.pushStatus(ctx)
+	return errors.Join(reportErr, userErr, statusErr, n.syncConfig(ctx))
 }
 
 func (n *node) pushReports(ctx context.Context) error {
@@ -380,8 +401,9 @@ func (n *node) pushReports(ctx context.Context) error {
 
 func (n *node) syncUsers(ctx context.Context) error {
 	// A rejected listener configuration must not postpone user revocation.
+	statusErr := n.pushStatus(ctx)
 	configErr := n.syncConfig(ctx)
-	return errors.Join(configErr, n.syncUserList(ctx))
+	return errors.Join(statusErr, configErr, n.syncUserList(ctx))
 }
 
 func (n *node) syncConfig(ctx context.Context) error {
@@ -397,6 +419,9 @@ func (n *node) syncConfig(ctx context.Context) error {
 		if err = json.Unmarshal(config, &response); err != nil {
 			return E.New("invalid xboard node configuration response")
 		}
+		if err = n.syncNodePolicy(ctx); err != nil {
+			return err
+		}
 		if n.auto != nil {
 			candidate, err := response.buildInboundConfig(n.nodeType, n.autoOptions)
 			if err != nil {
@@ -408,6 +433,8 @@ func (n *node) syncConfig(ctx context.Context) error {
 		}
 		n.applyConfigIntervals(response.configResponse)
 		n.configETag = etag
+	} else if status == http.StatusNotModified {
+		return n.syncNodePolicy(ctx)
 	}
 	return nil
 }
@@ -423,8 +450,8 @@ func (n *node) syncUserList(ctx context.Context) error {
 	if status == http.StatusNotModified {
 		return nil
 	}
-	var response usersResponse
-	if err = json.Unmarshal(body, &response); err != nil {
+	response, err := n.primary.client.decodeUsers(body)
+	if err != nil {
 		return E.Cause(err, "decode xboard users")
 	}
 	entries := make([]identifiedPanelUser, 0, len(response.Users))

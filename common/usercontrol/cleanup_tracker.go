@@ -3,7 +3,6 @@ package usercontrol
 import (
 	"context"
 	"net"
-	"reflect"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-tun"
@@ -13,7 +12,6 @@ import (
 var _ adapter.ConnectionTracker = (*ConnectionCleaner)(nil)
 
 // Registration is a detached view of one deduplicated connection and its current byte counter.
-// Type is reserved for confirmed original registration labels; unknown labels stay empty.
 // @author lyt
 // @date 2026-10-29
 type Registration struct {
@@ -39,18 +37,6 @@ func (c *ConnectionCleaner) RoutedConnection(
 	if metadata.User != "" {
 		conn = c.TrackConnection(conn)
 	}
-	key := connectionKey(conn)
-	if wrapper, ok := conn.(*cleanupConn); ok {
-		key = wrapper.key
-	} else if !reflect.TypeOf(key).Comparable() {
-		return conn
-	}
-	c.access.Lock()
-	if tracked := c.entries[key]; tracked != nil {
-		tracked.source = metadata.Source.Addr.Unmap().String()
-		tracked.userLabel = metadata.User
-	}
-	c.access.Unlock()
 	return conn
 }
 

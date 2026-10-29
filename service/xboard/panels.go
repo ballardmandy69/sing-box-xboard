@@ -2,7 +2,6 @@ package xboard
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -75,8 +74,8 @@ func (n *node) syncPanelUsers(ctx context.Context) error {
 		if status == http.StatusNotModified {
 			continue
 		}
-		var response usersResponse
-		if err = json.Unmarshal(body, &response); err != nil {
+		response, err := panel.client.decodeUsers(body)
+		if err != nil {
 			err = E.New("invalid users response from panel ", panel.client.options.PanelTag)
 			n.service.logger.Error("xboard source users retained: ", err)
 			pullErrors = append(pullErrors, err)
@@ -108,6 +107,7 @@ func (n *node) syncPanelUsers(ctx context.Context) error {
 func (n *node) applyUsers(entries []identifiedPanelUser) error {
 	names := make([]string, 0, len(entries))
 	credentials := make([]string, 0, len(entries))
+	passwords := make([]string, 0, len(entries))
 	users := make(map[string]uint64, len(entries))
 	limits := make(map[string]usercontrol.Limits, len(entries))
 	panels := make(map[string]*nodePanel, len(entries))
@@ -117,6 +117,7 @@ func (n *node) applyUsers(entries []identifiedPanelUser) error {
 		}
 		names = append(names, entry.name)
 		credentials = append(credentials, entry.user.UUID)
+		passwords = append(passwords, entry.user.ProtocolPassword)
 		users[entry.name] = entry.user.ID
 		limits[entry.name] = n.userLimits(entry.user)
 		panels[entry.name] = entry.panel
@@ -126,7 +127,16 @@ func (n *node) applyUsers(entries []identifiedPanelUser) error {
 			return E.Cause(err, "update xboard user limits")
 		}
 	}
-	if err := n.inbound.UpdateUsers(names, credentials); err != nil {
+	// A newly authenticated stream must already resolve to its panel user when
+	// the route policy runs. Removed users are denied by the updated controller.
+	n.access.Lock()
+	previousUsers, previousPanels := n.users, n.userPanels
+	n.users, n.userPanels = users, panels
+	n.access.Unlock()
+	if err := updateManagedPanelUsers(n.inbound, names, credentials, passwords); err != nil {
+		n.access.Lock()
+		n.users, n.userPanels = previousUsers, previousPanels
+		n.access.Unlock()
 		if n.control != nil {
 			if rollbackErr := n.control.UpdateUsers(n.limits); rollbackErr != nil {
 				return errors.Join(err, E.Cause(rollbackErr, "restore xboard user limits"))
@@ -136,9 +146,6 @@ func (n *node) applyUsers(entries []identifiedPanelUser) error {
 	}
 	n.limits = limits
 	n.traffic.UpdateUsers(names)
-	n.access.Lock()
-	n.users, n.userPanels = users, panels
-	n.access.Unlock()
 	n.service.logger.Info("xboard users synchronized: ", len(names), " node=", n.nodeID, " type=", n.nodeType)
 	return nil
 }

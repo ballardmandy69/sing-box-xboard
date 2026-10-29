@@ -25,6 +25,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/uot"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/exp/slices"
 )
@@ -244,6 +245,11 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 	packetDestination := metadata.Destination
 	err := r.prepareMatchMetadata(ctx, &metadata)
 	if err != nil {
+		return continueResult
+	}
+	if policy := service.FromContext[adapter.ManagedNodePolicy](r.ctx); metadata.Network == N.NetworkTCP &&
+		policy != nil && policy.HasNode(metadata.Inbound) {
+		// Managed policy needs the stream after legacy sniffing and explicit domain resolution.
 		return continueResult
 	}
 	if metadata.Network == N.NetworkTCP && (metadata.LegacyInboundOptions.SniffEnabled ||
@@ -562,6 +568,13 @@ func (r *Router) matchRule(
 	if legacyErr != nil {
 		fatalErr = legacyErr
 		return
+	}
+	if policy := service.FromContext[adapter.ManagedNodePolicy](r.ctx); metadata.Network == N.NetworkTCP &&
+		policy != nil {
+		if policyErr := policy.Check(ctx, metadata, inputConn); policyErr != nil {
+			fatalErr = &R.RejectedError{Cause: policyErr}
+			return
+		}
 	}
 	onDemandPending := r.ipOnDemand && metadata.Network == N.NetworkTCP
 	var executedActions map[int]bool

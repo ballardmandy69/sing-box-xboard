@@ -6,6 +6,7 @@ import "github.com/sagernet/sing/common/json/badoption"
 // @author lyt
 // @date 2026-10-29
 type NYAFWOptions struct {
+	BlockScanner                 string             `json:"block_scanner,omitempty"`
 	ConnectionCleanupIntervalSec uint64             `json:"connection_cleanup_interval_sec,omitempty"`
 	HotUserCacheSec              int64              `json:"hot_user_cache_sec,omitempty"`
 	AccessLog                    uint8              `json:"access_log,omitempty"`

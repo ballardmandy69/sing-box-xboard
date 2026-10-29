@@ -160,6 +160,9 @@ Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新�
 - UniProxy `MultiApiConfig` 聚合、全局与用户限速、IP/连接数/请求配额、ReportAlive。
 - 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
 - MemoryGuard 按系统可用内存关闭选中来源 IP 的连接，并按配置时长拒绝其新 TCP 连接。
+- `debug.listen` 提供原版的内存、连接榜、pprof、GC 和热用户缓存查询接口。
+- OldV2Board、PPanel 使用各自请求格式；PPanel 的状态报告保留原样本固定值，不代表实时负载。
+- `BlockScanner` CEL 扫描规则和主面板正则规则已接入，拒绝原因写入 AccessLog。
 - 旧 DNS/FakeIP、GeoIP/Geosite、ip_on_demand、旧入站嗅探与域名策略。
 - `ShadowsocksObfsMu` HTTP 前导机制。它不等于 WebSocket：101 后直接传输 SS 密文，没有 WS 帧。
 
@@ -183,6 +186,11 @@ MemoryGuard:
 比例按同一次内存压力事件首次出现连接时的来源 IP 数计算；连接关闭后基数保持不变。
 内存恢复只重置压力事件，尚未到期的 IP 封禁继续有效。
 
+开发分支可在 `config.json` 中设置 `"debug": {"listen": "127.0.0.1:9091"}`。
+`/debug/memory` 查看内存，`/debug/connections?top=100` 查看连接分组，
+`/sb/debug/users?tag=面板标签` 查看热用户过期时间；multi 使用节点 `ApiConfig.PanelTag`，
+并非 `MultiApiConfig` 中首个面板的标签。`debug.listen` 省略时不会开放这些接口。
+
 所有代理 UDP 协议和 UDP 转发均排除，内部 DNS 保留配置语义。
-仍有其他面板、私有扩展组合、规则和资源管理功能未完成；详细进度及证据限制见
+仍有 SSPanel、私有扩展组合、违规上报和 TLS/SNI 策略未完成；详细进度及证据限制见
 [完整复现清单](nyafw-parity.md)。完成原版运行对照前，不称为完整兼容版。

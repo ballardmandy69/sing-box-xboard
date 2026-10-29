@@ -22,6 +22,24 @@ type hotUsers struct {
 	now     func() time.Time
 }
 
+func (s *Service) DebugHotUsers(panelTag string) (map[string]time.Time, bool) {
+	for _, node := range s.nodes {
+		if node.debugTag != panelTag {
+			continue
+		}
+		result := make(map[string]time.Time)
+		if node.hotUsers != nil {
+			node.hotUsers.access.Lock()
+			for name, expires := range node.hotUsers.expires {
+				result[name] = expires
+			}
+			node.hotUsers.access.Unlock()
+		}
+		return result, true
+	}
+	return nil, false
+}
+
 func hotUserTTL(seconds int64) (time.Duration, error) {
 	if seconds <= 0 {
 		return 600 * time.Second, nil

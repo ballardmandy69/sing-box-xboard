@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/httpclient"
 	"github.com/sagernet/sing-box/common/netns"
+	"github.com/sagernet/sing-box/common/nodepolicy"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -196,6 +197,12 @@ func New(options Options) (*Box, error) {
 		}
 		internalServices = append(internalServices, runtime)
 	}
+	policies, err := nodepolicy.NewRegistry(common.PtrValueOrDefault(options.NYAFW).BlockScanner,
+		service.PtrFromContext[usercontrol.ConnectionCleaner](ctx))
+	if err != nil {
+		return nil, E.Cause(err, "initialize node policies")
+	}
+	service.MustRegister[adapter.ManagedNodePolicy](ctx, policies)
 	routeOptions := common.PtrValueOrDefault(options.Route)
 	certificateOptions := common.PtrValueOrDefault(options.Certificate)
 	if C.IsAndroid || certificateOptions.Store != "" && certificateOptions.Store != C.CertificateStoreSystem ||
@@ -557,7 +564,7 @@ func (s *Box) preStart() error {
 	}
 	s.scope.Add(s.logFactory.Close)
 	applyDebugOptions(s.debugOptions)
-	debugHTTPServer, err := startDebugHTTPServer(s.debugOptions)
+	debugHTTPServer, err := startDebugHTTPServer(s.scope.Context(), s.debugOptions)
 	if err != nil {
 		return err
 	}

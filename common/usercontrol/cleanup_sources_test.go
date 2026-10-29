@@ -25,6 +25,9 @@ func TestSourceSnapshotDeduplicatesKeysAndKeepsOriginalSource(t *testing.T) {
 	raw := &sourcedFixture{source: "::ffff:192.0.2.1"}
 	inner := cleaner.TrackAcceptedConnection(raw, netip.MustParseAddr(raw.source))
 	outer := cleaner.TrackConnection(inner)
+	if entries := cleaner.SnapshotRegistrations(); len(entries) != 1 || entries[0].Type != "tcp-inbound" {
+		t.Fatalf("duplicate key replaced inbound registration type: %+v", entries)
+	}
 	outer.Write([]byte("abc"))
 	outer.Read(make([]byte, 2))
 	snapshot := cleaner.SourceSnapshot()
@@ -107,9 +110,9 @@ func TestRoutedRegistrationIncludesUnmanagedAuthenticatedStreams(t *testing.T) {
 	defer routed.Close()
 	routed.Write([]byte("data"))
 	entries := cleaner.SnapshotRegistrations()
-	if len(entries) != 1 || entries[0].UserLabel != "user-a" || entries[0].Traffic != 4 ||
-		entries[0].SourceIP != "198.51.100.1" {
-		t.Fatalf("routed wrapper lost key deduplication/metadata/counter: %+v", entries)
+	if len(entries) != 1 || entries[0].Type != "tcp-inbound" || entries[0].UserLabel != "" ||
+		entries[0].Traffic != 4 || entries[0].SourceIP != "192.0.2.1" {
+		t.Fatalf("generic tracker must retain registration metadata while replacing the counter: %+v", entries)
 	}
 	logical := cleaner.RoutedConnection(context.Background(), &fixtureConn{}, metadata, nil, nil)
 	defer logical.Close()
@@ -125,13 +128,18 @@ func TestRoutedRegistrationIncludesUnmanagedAuthenticatedStreams(t *testing.T) {
 	defer nonComparable.Close()
 }
 
-func TestRoutedInvalidSourceReplacesOldAddressWithAddrString(t *testing.T) {
+func TestManagedMetadataInvalidSourceReplacesOldAddressWithAddrString(t *testing.T) {
 	cleaner := newCleaner(t)
 	conn := cleaner.TrackAcceptedConnection(&fixtureConn{}, netip.MustParseAddr("192.0.2.1"))
 	defer conn.Close()
+	cleaner.UpdateMetadata(conn, "tcp-routed", netip.Addr{}.String(), "panel-label")
 	cleaner.RoutedConnection(context.Background(), conn, adapter.InboundContext{}, nil, nil)
 	snapshot := cleaner.SourceSnapshot()
 	if len(snapshot) != 1 || snapshot[0].SourceIP != "invalid IP" {
 		t.Fatalf("invalid metadata was retained or dropped instead of Addr.String: %+v", snapshot)
+	}
+	entries := cleaner.SnapshotRegistrations()
+	if entries[0].UserLabel != "panel-label" || entries[0].Type != "tcp-routed" {
+		t.Fatalf("generic tracker overwrote managed metadata: %+v", entries)
 	}
 }

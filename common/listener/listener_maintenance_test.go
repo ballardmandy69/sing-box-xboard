@@ -176,6 +176,7 @@ func TestMaintenancePrecedesProxyHeaderAndRoutedMetadataUpdate(t *testing.T) {
 		t.Fatalf("registration moved after PROXY parsing or excluded handshake bytes: %+v", snapshot)
 	}
 	metadata := adapter.InboundContext{User: "user-a", Source: M.SocksaddrFromNet(server.RemoteAddr()).Unwrap()}
+	cleaner.UpdateMetadata(server, "tcp-routed", metadata.Source.Addr.Unmap().String(), "panel-label")
 	routed := cleaner.RoutedConnection(ctx, server, metadata, nil, nil)
 	defer routed.Close()
 	if _, err := io.ReadFull(routed, make([]byte, 4)); err != nil {

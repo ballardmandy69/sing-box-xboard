@@ -56,10 +56,11 @@ func normalizeLegacyServerConfig(value any) any {
 		}
 		nodeType := strings.ToLower(legacyString(apiConfig["NodeType"]))
 		service := map[string]any{
-			"type":          "xboard",
-			"tag":           panelTag,
-			"inbound":       panelTag,
-			"sync_interval": "0s",
+			"type":             "xboard",
+			"tag":              panelTag,
+			"inbound":          panelTag,
+			"sync_interval":    "0s",
+			"legacy_panel_tag": legacyString(apiConfig["PanelTag"]),
 		}
 		if panelType == "multi" {
 			rawPanels, _ := node["MultiApiConfig"].([]any)
@@ -163,6 +164,9 @@ func normalizeLegacyServerConfig(value any) any {
 	if duration, exists := root["HotUserCacheSec"]; exists {
 		nyafw["hot_user_cache_sec"] = duration
 	}
+	if expression, exists := root["BlockScanner"]; exists {
+		nyafw["block_scanner"] = expression
+	}
 	if guard, exists := root["MemoryGuard"]; exists {
 		nyafw["memory_guard"] = normalizeLegacyMemoryGuard(guard)
 	}
@@ -191,7 +195,7 @@ func normalizeLegacyServerConfig(value any) any {
 	for _, key := range []string{
 		"Nodes", "AccessLog", "DisableAccessLog", "DisablePrintAccessLog", "SbApi", "IPLimit", "RateLimit",
 		"ConnectionCleanupIntervalSec", "HotUserCacheSec", "ShadowsocksBanIP", "QuicBbrWrongLogic",
-		"ConnectionLimit", "MemoryGuard", "MaxSpeedLimit", "TrafficFactor",
+		"ConnectionLimit", "MemoryGuard", "MaxSpeedLimit", "TrafficFactor", "BlockScanner",
 	} {
 		delete(root, key)
 	}
@@ -261,8 +265,8 @@ func validateLegacyNodes(value any) error {
 		}
 		api, ok := node["ApiConfig"].(map[string]any)
 		panelType := legacyPanelType(node, api)
-		if panelType != "uniproxy" && panelType != "multi" {
-			return fmt.Errorf("Nodes[%d].Type must be UniProxy or multi in the current reconstruction", index)
+		if !legacySupportedPanelType(panelType) && panelType != "multi" {
+			return fmt.Errorf("Nodes[%d].Type must be UniProxy, OldV2Board, PPanel or multi in the current reconstruction", index)
 		}
 		if panelType == "multi" {
 			panels, ok := node["MultiApiConfig"].([]any)
@@ -274,8 +278,8 @@ func validateLegacyNodes(value any) error {
 				if !ok {
 					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d] must be an object", index, child)
 				}
-				if kind := legacyString(panel["Type"]); kind != "" && !strings.EqualFold(kind, "uniproxy") {
-					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d].Type currently supports only UniProxy", index, child)
+				if kind := legacyString(panel["Type"]); kind != "" && !legacySupportedPanelType(strings.ToLower(kind)) {
+					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d].Type supports UniProxy, OldV2Board or PPanel", index, child)
 				}
 			}
 		} else if !ok {
@@ -304,6 +308,10 @@ func validateLegacyNodes(value any) error {
 		}
 	}
 	return nil
+}
+
+func legacySupportedPanelType(kind string) bool {
+	return kind == "uniproxy" || kind == "oldv2board" || kind == "ppanel"
 }
 
 func legacyPanelType(node, api map[string]any) string {

@@ -200,6 +200,23 @@ Nodes:
 	if err != nil || !bytes.Contains(encoded, []byte("18446744073709551615")) {
 		t.Fatal("formatting a service lost the exact unsigned limit")
 	}
+	if options.LegacyPanelTag == nil || *options.LegacyPanelTag != "" {
+		t.Fatal("missing legacy API tag must remain an explicit empty debug lookup key")
+	}
+	content = bytes.Replace(content, []byte("    MultiApiConfig:"),
+		[]byte("    ApiConfig:\n      PanelTag: controller\n    MultiApiConfig:"), 1)
+	if err = os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err = readConfigAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options = entry.options.Services[0].Options.(*option.XBoardServiceOptions)
+	if options.LegacyPanelTag == nil || *options.LegacyPanelTag != "controller" ||
+		options.Panels[0].PanelTag != "first" {
+		t.Fatal("controller debug lookup tag was replaced with the first aggregated panel tag")
+	}
 }
 
 func TestMultiActivationUsesEffectiveApiType(t *testing.T) {

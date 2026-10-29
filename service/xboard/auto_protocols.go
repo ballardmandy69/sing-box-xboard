@@ -177,6 +177,14 @@ func shadowsocksUserKeySize(method string) int {
 }
 
 func (c autoInboundConfig) userCredentials(credentials []string) ([]string, error) {
+	return c.panelCredentials(credentials, make([]string, len(credentials)))
+}
+
+func (c autoInboundConfig) panelCredentials(uuids, passwords []string) ([]string, error) {
+	credentials, err := panelProtocolCredentials(c.protocol, uuids, passwords)
+	if err != nil {
+		return nil, err
+	}
 	if c.protocol != C.TypeShadowsocks {
 		return credentials, nil
 	}
@@ -193,6 +201,10 @@ func (c autoInboundConfig) userCredentials(credentials []string) ([]string, erro
 	}
 	converted := make([]string, len(credentials))
 	for index, credential := range credentials {
+		if passwords[index] != "" {
+			converted[index] = credential
+			continue
+		}
 		if len(credential) < keySize {
 			return nil, fmt.Errorf("xboard Shadowsocks 2022 user credential is too short")
 		}

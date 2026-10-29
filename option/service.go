@@ -15,6 +15,7 @@ import (
 // @author lyt
 // @date 2026-10-25
 type XBoardServiceOptions struct {
+	LegacyPanelTag       *string                           `json:"legacy_panel_tag,omitempty"`
 	PanelType            string                            `json:"panel_type,omitempty"`
 	Panels               []XBoardPanelOptions              `json:"panels,omitempty"`
 	APIHost              string                            `json:"api_host,omitempty"`

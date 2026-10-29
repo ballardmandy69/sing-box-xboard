@@ -43,6 +43,7 @@ func (r *Router) applyLegacyInboundOptions(ctx context.Context, metadata *adapte
 				metadata.Protocol = sniffMetadata.Protocol
 				metadata.Domain = sniffMetadata.Domain
 				metadata.Client = sniffMetadata.Client
+				metadata.TLSFingerprint = sniffMetadata.TLSFingerprint
 				if options.SniffOverrideDestination && metadata.Destination.IsIP() &&
 					!metadata.FakeIP && M.IsDomainName(metadata.Domain) {
 					originalIP = metadata.Destination.Addr

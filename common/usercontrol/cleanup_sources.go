@@ -18,7 +18,13 @@ type SourceUsage struct {
 
 // TrackAcceptedConnection is called before the protocol handler reads its first byte.
 func (c *ConnectionCleaner) TrackAcceptedConnection(conn net.Conn, source netip.Addr) net.Conn {
-	return c.trackConnection(conn, source.Unmap().String())
+	tracked := c.trackConnection(conn, source.Unmap().String()).(*cleanupConn)
+	c.access.Lock()
+	tracked.kind = "tcp-inbound"
+	tracked.source = source.Unmap().String()
+	tracked.userLabel = ""
+	c.access.Unlock()
+	return tracked
 }
 
 // SourceSnapshot orders sources by connection count, traffic, then textual IP address.

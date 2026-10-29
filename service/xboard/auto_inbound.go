@@ -48,6 +48,7 @@ type autoInbound struct {
 	tracker     adapter.SSMTracker
 	users       []string
 	credentials []string
+	passwords   []string
 	hotUsers    []string
 	hotCallback func(string)
 }
@@ -135,16 +136,20 @@ func (h *autoInbound) SetTracker(tracker adapter.SSMTracker) {
 }
 
 func (h *autoInbound) UpdateUsers(users, credentials []string) error {
+	return h.updatePanelUsers(users, credentials, make([]string, len(credentials)))
+}
+
+func (h *autoInbound) updatePanelUsers(users, credentials, passwords []string) error {
 	h.access.Lock()
 	defer h.access.Unlock()
 	if h.closed {
 		return net.ErrClosed
 	}
-	if len(users) != len(credentials) {
+	if len(users) != len(credentials) || len(users) != len(passwords) {
 		return fmt.Errorf("%w: users and credentials have different lengths", errCachedUsersInvalid)
 	}
 	if h.current != nil {
-		if err := h.current.updateUsers(users, credentials); err != nil {
+		if err := h.current.updatePanelUsers(users, credentials, passwords); err != nil {
 			return err
 		}
 		if manager, ok := h.current.inbound.(adapter.HotUserManager); ok {
@@ -153,6 +158,7 @@ func (h *autoInbound) UpdateUsers(users, credentials []string) error {
 	}
 	h.users = slices.Clone(users)
 	h.credentials = slices.Clone(credentials)
+	h.passwords = slices.Clone(passwords)
 	return nil
 }
 
@@ -179,14 +185,18 @@ func (h *autoInbound) SetHotUserCallback(callback func(string)) {
 }
 
 func (i *autoInboundInstance) updateUsers(users, originalCredentials []string) error {
-	credentials, err := i.config.userCredentials(originalCredentials)
+	return i.updatePanelUsers(users, originalCredentials, make([]string, len(originalCredentials)))
+}
+
+func (i *autoInboundInstance) updatePanelUsers(users, uuids, passwords []string) error {
+	credentials, err := i.config.panelCredentials(uuids, passwords)
 	if err != nil {
 		return fmt.Errorf("%w: credential conversion failed", errCachedUsersInvalid)
 	}
 	if server, ok := i.inbound.(interface {
 		UpdateUsersWithUUIDs([]string, []string, []string) error
 	}); ok {
-		err = server.UpdateUsersWithUUIDs(users, credentials, originalCredentials)
+		err = server.UpdateUsersWithUUIDs(users, credentials, uuids)
 	} else {
 		err = i.inbound.UpdateUsers(users, credentials)
 	}
@@ -257,7 +267,7 @@ func (h *autoInbound) prepare(config autoInboundConfig) (*autoInboundInstance, e
 		return nil, err
 	}
 	instance.inbound.SetTracker(h.tracker)
-	if err = instance.updateUsers(h.users, h.credentials); err != nil {
+	if err = instance.updatePanelUsers(h.users, h.credentials, h.passwords); err != nil {
 		instance.scope.Close()
 		return nil, err
 	}

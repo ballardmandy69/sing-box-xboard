@@ -15,6 +15,16 @@ import (
 // @author lyt
 // @date 2026-10-29
 func TestNativeAccessLog(t *testing.T) {
+	for _, denied := range []bool{false, true} {
+		name := "allowed"
+		if denied {
+			name = "scanner-rejected"
+		}
+		t.Run(name, func(t *testing.T) { testNativeAccessLog(t, denied) })
+	}
+}
+
+func testNativeAccessLog(t *testing.T, denied bool) {
 	const userUUID = "ec682053-9beb-49fb-8b58-a755e37b51e2"
 	type record struct {
 		Time                    int64
@@ -64,8 +74,14 @@ func TestNativeAccessLog(t *testing.T) {
 	privateKey, publicKey := nativeTestKeys(t)
 	inbound := nativeServerConfig(nativeFreePort(t), privateKey)
 	inbound["users"] = []any{}
+	expression := ""
+	expectedOutbound := "exit"
+	if denied {
+		expression = `uid == 101u ? "blocked by test" : ""`
+		expectedOutbound = "gfw:blocked by test"
+	}
 	nativeStartBox(t, map[string]any{
-		"nyafw": map[string]any{"access_log": 0, "sb_api": map[string]any{
+		"nyafw": map[string]any{"access_log": 0, "block_scanner": expression, "sb_api": map[string]any{
 			"base_url": receiver.URL, "tag": "node-log", "token": "local-log-token",
 		}},
 		"inbounds":  []any{inbound},
@@ -81,12 +97,13 @@ func TestNativeAccessLog(t *testing.T) {
 		nativeClientConfig(inbound["listen_port"].(uint16), publicKey, "native", userUUID),
 	}}, nil)
 	destination := nativeEchoServer(t)
-	if err := nativeExchange(nativeGetOutbound(t, client, "native"), destination, 1024); err != nil {
-		t.Fatal(err)
+	err := nativeExchange(nativeGetOutbound(t, client, "native"), destination, 1024)
+	if denied && err == nil || !denied && err != nil {
+		t.Fatalf("scanner denied=%v, exchange error=%v", denied, err)
 	}
 	select {
 	case entry := <-records:
-		if entry.Inbound != "native-in" || entry.Outbound != "exit" || entry.Uid != 101 ||
+		if entry.Inbound != "native-in" || entry.Outbound != expectedOutbound || entry.Uid != 101 ||
 			entry.Net != "tcp" || entry.Dst != destination.String() || !strings.HasPrefix(entry.Src, "127.0.0.1:") ||
 			entry.Time < time.Now().Add(-time.Minute).Unix() {
 			t.Fatalf("wrong captured routed metadata: %+v", entry)
