@@ -19,9 +19,10 @@ import (
 var errCachedUsersInvalid = errors.New("cached automatic inbound users are invalid")
 
 type autoInboundConfig struct {
-	protocol string
-	options  any
-	endpoint netip.AddrPort
+	protocol       string
+	options        any
+	endpoint       netip.AddrPort
+	masterPassword string
 }
 
 type autoInboundInstance struct {

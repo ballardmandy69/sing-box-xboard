@@ -132,6 +132,39 @@ func (m *Manager) UpdateUsers(users map[string]Limits) error {
 func (m *Manager) TrackConnectionContext(ctx context.Context, conn net.Conn,
 	metadata adapter.InboundContext,
 ) (net.Conn, error) {
+	return m.trackConnection(ctx, conn, metadata, m.requestLimit)
+}
+
+// CheckRequest consumes the request quota before sniffing and node policy evaluation.
+func (m *Manager) CheckRequest(ctx context.Context, user string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.access.RLock()
+	defer m.access.RUnlock()
+	state := m.users[user]
+	if state == nil {
+		return ErrUnknownUser
+	}
+	state.access.Lock()
+	defer state.access.Unlock()
+	if !state.requests.accept(m.now().Unix(), m.requestLimit) {
+		return ErrRequestLimit
+	}
+	return nil
+}
+
+// TrackRoutedConnection admits a request already checked by CheckRequest.
+// Node policy rejection therefore consumes requests, but never active connection or IP slots.
+func (m *Manager) TrackRoutedConnection(ctx context.Context, conn net.Conn,
+	metadata adapter.InboundContext,
+) (net.Conn, error) {
+	return m.trackConnection(ctx, conn, metadata, 0)
+}
+
+func (m *Manager) trackConnection(ctx context.Context, conn net.Conn,
+	metadata adapter.InboundContext, requestLimit uint64,
+) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -146,7 +179,7 @@ func (m *Manager) TrackConnectionContext(ctx context.Context, conn net.Conn,
 		return nil, ErrUnknownUser
 	}
 	ip := metadata.Source.Addr.Unmap()
-	err := state.acquire(ip, m.requestLimit, m.now().Unix())
+	err := state.acquire(ip, requestLimit, m.now().Unix())
 	cleaner := m.cleaner
 	m.access.RUnlock()
 	if err != nil {

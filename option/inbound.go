@@ -19,9 +19,10 @@ type InboundOptionsRegistry interface {
 }
 
 type _Inbound struct {
-	Type    string `json:"type"`
-	Tag     string `json:"tag,omitempty"`
-	Options any    `json:"-"`
+	Type        string `json:"type"`
+	Tag         string `json:"tag,omitempty"`
+	UsePanelTag string `json:"use_panel_tag,omitempty"`
+	Options     any    `json:"-"`
 }
 
 type Inbound _Inbound

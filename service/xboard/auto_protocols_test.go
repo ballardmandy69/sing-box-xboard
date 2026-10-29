@@ -53,8 +53,11 @@ func TestAutoStandardTCPTransports(t *testing.T) {
 		want     string
 	}{
 		{"ws", `{"path":"/socket","headers":{"Host":"node.example","X-Test":["a","b"]}}`, "ws"},
+		{"websocket", `{"path":"/socket?ed=1","neko":"ignored by UniProxy"}`, "ws"},
 		{"httpupgrade", `{"path":"/upgrade","host":"node.example"}`, "httpupgrade"},
 		{"httpupgrade", `{"path":"/upgrade","headers":{"Host":"node.example"}}`, "httpupgrade"},
+		{"http-upgrade", `{"path":"/upgrade"}`, "httpupgrade"},
+		{"http_upgrade", `{"path":"/upgrade"}`, "httpupgrade"},
 		{"grpc", `{"serviceName":"proxy-service"}`, "grpc"},
 	}
 	for _, test := range tests {
@@ -64,15 +67,16 @@ func TestAutoStandardTCPTransports(t *testing.T) {
 			if err != nil || transport.Type != test.want {
 				t.Fatalf("invalid transport mapping: %#v %v", transport, err)
 			}
-			switch test.network {
+			switch test.want {
 			case "ws":
 				if transport.WebsocketOptions.Path != "/socket" ||
-					transport.WebsocketOptions.Headers["Host"][0] != "node.example" ||
-					len(transport.WebsocketOptions.Headers["X-Test"]) != 2 {
+					len(transport.WebsocketOptions.Headers) != 0 ||
+					transport.WebsocketOptions.MaxEarlyData != 2048 ||
+					transport.WebsocketOptions.EarlyDataHeaderName != "Sec-WebSocket-Protocol" {
 					t.Fatal("websocket settings changed")
 				}
 			case "httpupgrade":
-				if transport.HTTPUpgradeOptions.Host != "node.example" ||
+				if transport.HTTPUpgradeOptions.Host != "" || len(transport.HTTPUpgradeOptions.Headers) != 0 ||
 					transport.HTTPUpgradeOptions.Path != "/upgrade" {
 					t.Fatal("HTTP upgrade host or path changed")
 				}
@@ -83,10 +87,93 @@ func TestAutoStandardTCPTransports(t *testing.T) {
 			}
 		})
 	}
-	for _, network := range []string{"quic", "kcp", "xhttp", "unknown"} {
+	for _, network := range []string{"quic", "kcp", "xhttp", "http", "h2", "unknown"} {
 		if _, err := (autoConfigResponse{Network: network}).transportOptions(C.TypeVLESS); err == nil {
 			t.Fatalf("unsupported transport %s was accepted", network)
 		}
+	}
+}
+
+func TestAutoLegacyWebSocketPathQuery(t *testing.T) {
+	for _, test := range []struct{ path, want string }{
+		{"/socket?ed=4096", "/socket"},
+		{"/socket?ed=0", "/socket"},
+		{"/socket?ed=", "/socket?ed="},
+		{"/socket?ed=&ed=4096", "/socket?ed=&ed=4096"},
+		{"/socket?z=2&ed=2048&a=1", "/socket?a=1&z=2"},
+		{"/socket?z=2&a=1", "/socket?z=2&a=1"},
+		{"/%zz?ed=2048", "/%zz?ed=2048"},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			settings, err := json.Marshal(panelTransportSettings{Path: test.path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport, err := (autoConfigResponse{Network: "ws", NetworkSettings: settings}).transportOptions(C.TypeVMess)
+			if err != nil || transport.WebsocketOptions.Path != test.want || transport.WebsocketOptions.MaxEarlyData != 2048 {
+				t.Fatalf("legacy path/default changed: %#v %v", transport, err)
+			}
+		})
+	}
+	if _, err := (autoConfigResponse{Network: "ws", providerNormalized: true,
+		NetworkSettings: json.RawMessage(`{"neko":"unconfirmed provider field"}`),
+	}).transportOptions(C.TypeVMess); err == nil {
+		t.Fatal("UniProxy-specific neko handling was generalized to other providers")
+	}
+}
+
+func TestAutoLegacyRawTCPIgnoresSettings(t *testing.T) {
+	for _, network := range []string{"", "tcp"} {
+		for _, settings := range []string{
+			`{"path":"/irrelevant","neko":"ignored"}`, `[]`, `1`, `"ignored"`, `invalid JSON`,
+		} {
+			t.Run(network+"/"+settings, func(t *testing.T) {
+				transport, err := (autoConfigResponse{Network: network, providerNormalized: true,
+					NetworkSettings: json.RawMessage(settings),
+				}).transportOptions(C.TypeAnyTLS)
+				if err != nil || transport != nil {
+					t.Fatalf("raw TCP did not ignore irrelevant settings: %#v %v", transport, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAutoLegacyTransportIgnoresUnusedFields(t *testing.T) {
+	for _, network := range []string{"ws", "websocket", "httpupgrade", "http-upgrade", "http_upgrade", "grpc"} {
+		t.Run(network, func(t *testing.T) {
+			transport, err := (autoConfigResponse{Network: network, NetworkSettings: json.RawMessage(
+				`{"path":"/socket","serviceName":"proxy-service","host":{"ignored":true},` +
+					`"headers":["ignored"],"neko":{"ignored":true}}`),
+			}).transportOptions(C.TypeVMess)
+			if err != nil || transport == nil {
+				t.Fatalf("ignored UniProxy settings affected transport mapping: %v", err)
+			}
+		})
+	}
+}
+
+func TestAutoLegacyTransportRejectsInvalidConsumedFields(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		network    string
+		settings   string
+		normalized bool
+	}{
+		{"settings object", "ws", `[]`, false},
+		{"websocket path", "ws", `{"path":123}`, false},
+		{"upgrade path", "httpupgrade", `{"path":{}}`, false},
+		{"grpc service", "grpc", `{"serviceName":[]}`, false},
+		{"normalized neko", "ws", `{"neko":"unsupported"}`, true},
+		{"invalid normalized neko", "ws", `{"neko":{}}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := (autoConfigResponse{Network: test.network, providerNormalized: test.normalized,
+				NetworkSettings: json.RawMessage(test.settings),
+			}).transportOptions(C.TypeVMess); err == nil {
+				t.Fatal("invalid consumed transport field was accepted")
+			}
+		})
 	}
 }
 

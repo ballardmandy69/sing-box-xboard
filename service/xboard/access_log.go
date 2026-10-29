@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/nodepolicy"
 	"github.com/sagernet/sing-tun"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -95,20 +96,37 @@ func (n *node) accessLogLoop(ctx context.Context, interval time.Duration) {
 // @date 2026-10-29
 type accessLogTracker struct {
 	queues map[string]*accessLogQueue
+	policy *nodepolicy.Registry
 }
 
 func (t *accessLogTracker) record(metadata adapter.InboundContext, outbound adapter.Outbound) {
-	queue := t.queues[metadata.Inbound]
+	panelTag, uid, bound := metadata.ManagedNodeIdentity()
+	if !bound {
+		panelTag = metadata.Inbound
+	}
+	if !bound && t.policy != nil {
+		panelTag = t.policy.PanelTag(panelTag)
+	}
+	queue := t.queues[panelTag]
 	if queue == nil || queue.mode == 2 || outbound == nil || metadata.Network != N.NetworkTCP {
 		return
 	}
-	name, _, ok := strings.Cut(metadata.User, "@")
-	if !ok {
-		return
-	}
-	uid, err := strconv.ParseUint(name, 10, 64)
-	if err != nil {
-		return
+	if !bound && t.policy != nil && t.policy.HasNode(metadata.Inbound) {
+		user, exists := t.policy.LookupUser(metadata.Inbound, metadata.User)
+		if !exists {
+			return
+		}
+		uid = user.ID
+	} else if !bound {
+		name, _, ok := strings.Cut(metadata.User, "@")
+		if !ok {
+			return
+		}
+		var err error
+		uid, err = strconv.ParseUint(name, 10, 64)
+		if err != nil {
+			return
+		}
 	}
 	queue.put(accessRecord{
 		Inbound: metadata.Inbound, Outbound: outbound.Tag(), Uid: uid, Net: metadata.Network,

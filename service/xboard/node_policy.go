@@ -46,11 +46,16 @@ func (n *node) syncNodePolicy(ctx context.Context) error {
 			rules = provider.NodeRules()
 		}
 	}
-	err := n.service.policy.Register(n.inbound.Tag(), nodepolicy.Node{
-		LookupUser: n.lookupPolicyUser,
-		Rules:      rules,
-		OnBlocked:  n.recordPolicyRejection,
-		OnIllegal:  n.recordIllegal,
+	err := n.service.policy.Register(n.policyTag(), nodepolicy.Node{
+		LookupUser:       n.lookupPolicyUser,
+		Static:           n.staticInbound,
+		LookupStaticUser: n.lookupStaticPolicyUser,
+		LookupAuthUUID:   n.lookupAuthUUID,
+		CheckRequest:     n.checkNodeRequest,
+		TrackConnection:  n.trackNodeConnection,
+		Rules:            rules,
+		OnBlocked:        n.recordPolicyRejection,
+		OnIllegal:        n.recordIllegal,
 	})
 	if err != nil {
 		return fmt.Errorf("update panel node policy: %w", err)
@@ -83,7 +88,7 @@ func (s *Service) closeNodePolicies() error {
 	s.policyClosed = true
 	if s.policy != nil {
 		for _, node := range s.nodes {
-			s.policy.Remove(node.inbound.Tag())
+			s.policy.Remove(node.policyTag())
 		}
 	}
 	return nil

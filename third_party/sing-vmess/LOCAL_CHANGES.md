@@ -50,3 +50,18 @@ github.com/sagernet/sing-shadowsocks/shadowaead -count=1 -timeout=35s` and
 `go test -race ./protocol/vmess ./protocol/shadowsocks ./service/xboard -count=1 -timeout=45s`.
 Hot tests verify ordering, one attempt per candidate, cold fallback, credential rotation,
 replay/expiry checks, concurrent publication and real managed authentication during reordering.
+
+## Optional source authentication-failure hooks
+
+`SetAuthenticationFailureHooks(report, blocked)` publishes an immutable callback pair.
+TCP checks the source before reading a request and reports only when identity lookup finds
+no matching user. Short initial reads, recognized-but-expired identities, replay rejection,
+encrypted-header errors and subsequent protocol/business errors do not report failures.
+This matches the analyzed `d06a00` unknown-identity branch, not a generic connection-error
+counter. The box layer connects the optional callbacks to the same process-wide source policy
+as legacy Shadowsocks. Callback publication is safe during concurrent authentication.
+
+Linux race tests passed three times for this package, legacy Shadowsocks, both inbound
+packages and `common/authban`. Tests include real TCP clients behind PROXY headers, shared
+cross-protocol failure counts, unrelated-source success and disabled-policy behavior.
+The original executable was not run; this does not claim a runtime wire comparison.

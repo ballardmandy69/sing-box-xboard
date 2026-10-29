@@ -100,11 +100,17 @@ func normalizeLegacyServerConfig(value any) any {
 			service["max_speed_limit"] = fmt.Sprint(maximum)
 		}
 		autoInbound := map[string]any{}
+		rootBanIP, _ := root["ShadowsocksBanIP"].(bool)
+		nodeBanIP, _ := node["ShadowsocksBanIP"].(bool)
+		if rootBanIP || nodeBanIP {
+			autoInbound["shadowsocks_ban_ip"] = true
+		}
 		for legacyKey, field := range map[string]string{
 			"DisableTLS": "disable_tls", "TLSJson": "tls_json",
 			"AcceptAnyTLS": "accept_anytls", "FallbackService": "fallback_service",
 			"ForceMux": "force_mux", "ServerPadding": "server_padding", "PaddingScheme": "padding_scheme",
 			"VLESS": "vless", "DisableSniffing": "disable_sniffing",
+			"MasterPassword": "master_password",
 		} {
 			if value, exists := node[legacyKey]; exists {
 				autoInbound[field] = value
@@ -148,6 +154,8 @@ func normalizeLegacyServerConfig(value any) any {
 		}
 		if static, _ := node["StaticInbound"].(bool); !static {
 			service["auto_inbound"] = autoInbound
+		} else {
+			service["static_inbound"] = true
 		}
 		if nodeType != "" {
 			service["node_type"] = nodeType
@@ -270,6 +278,11 @@ func validateLegacyNodes(value any) error {
 	if !exists {
 		return nil
 	}
+	if value, exists := root["ShadowsocksBanIP"]; exists {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("ShadowsocksBanIP must be a boolean")
+		}
+	}
 	nodes, ok := rawNodes.([]any)
 	if !ok {
 		return fmt.Errorf("Nodes must be an array; use Nodes: [] for no panel nodes")
@@ -317,7 +330,7 @@ func validateLegacyNodes(value any) error {
 				return fmt.Errorf("Nodes[%d].ListenPort must be an integer between 0 and 65535", index)
 			}
 		}
-		for _, field := range []string{"AutoOutIP", "ProxyProtocol", "StaticInbound", "ForceVision"} {
+		for _, field := range []string{"AutoOutIP", "ProxyProtocol", "StaticInbound", "ForceVision", "ShadowsocksBanIP"} {
 			if value, exists := node[field]; exists {
 				if _, ok := value.(bool); !ok {
 					return fmt.Errorf("Nodes[%d].%s must be a boolean", index, field)

@@ -11,7 +11,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-mux"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -30,7 +29,7 @@ func (r *Router) routeLegacyMultiplex(ctx context.Context, conn net.Conn,
 		return err
 	}
 	conn.SetReadDeadline(time.Time{})
-	conn = bufio.NewCachedConn(conn, buf.As(header.Bytes()).ToOwned())
+	conn = newCachedConn(conn, buf.As(header.Bytes()).ToOwned())
 	service, err := mux.NewService(mux.ServiceOptions{
 		NewStreamContext: func(ctx context.Context, _ net.Conn) context.Context {
 			return log.ContextWithNewID(ctx)

@@ -54,3 +54,20 @@ decrypted to verify every payload. The fix is a robustness correction in the rec
 not a claim that the original nyafw binary had identical synchronization.
 
 - `go test -race github.com/sagernet/sing-shadowsocks/shadowaead_2022 -run TestServerConn -count=5 -timeout=45s` passed.
+
+## Optional source authentication-failure hooks
+
+Legacy AEAD multi-user TCP accepts `SetAuthenticationFailureHooks(report, blocked)` callbacks.
+The block check runs before reading or trying users; reporting occurs only when the complete
+hot/full candidate loop fails. Initial header reads, cipher construction errors, explicit user
+hints, authenticated destination parsing and business routing do not report failures. As in
+the analyzed sample's `1132aa0` branch, a payload short read inside `ReadWithLengthChunk` can
+exhaust the candidates and count as a failure; this is not exclusively a wrong-password counter.
+Callbacks are snapshotted under the service lock and invoked outside it.
+
+The box layer installs the process-wide policy only for legacy multi-user services. SS2022
+and single/shared-password services have no hooks. No UDP behavior or wire format was added.
+Static evidence is documented in `full-parity/limits-node-options.md`; the original executable
+was not run. Linux race tests passed three times for both vendor packages, both protocol
+packages and `common/authban`, including real cross-protocol TCP, PROXY source addresses,
+default-off operation and SS2022/shared-obfs exclusions.

@@ -111,6 +111,8 @@ func (n *node) applyUsers(entries []identifiedPanelUser) error {
 	users := make(map[string]uint64, len(entries))
 	limits := make(map[string]usercontrol.Limits, len(entries))
 	panels := make(map[string]*nodePanel, len(entries))
+	staticUsers := make(map[string]string, len(entries))
+	authUUIDs := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		if entry.user.ID == 0 || strings.TrimSpace(entry.user.UUID) == "" {
 			continue
@@ -121,6 +123,8 @@ func (n *node) applyUsers(entries []identifiedPanelUser) error {
 		users[entry.name] = entry.user.ID
 		limits[entry.name] = n.userLimits(entry.user)
 		panels[entry.name] = entry.panel
+		staticUsers[entry.user.UUID] = entry.name
+		authUUIDs[entry.name] = entry.user.UUID
 	}
 	if n.control != nil {
 		if err := n.control.UpdateUsers(limits); err != nil {
@@ -131,11 +135,21 @@ func (n *node) applyUsers(entries []identifiedPanelUser) error {
 	// the route policy runs. Removed users are denied by the updated controller.
 	n.access.Lock()
 	previousUsers, previousPanels := n.users, n.userPanels
+	previousStaticUsers := n.staticUsers
+	previousAuthUUIDs := n.authUUIDs
 	n.users, n.userPanels = users, panels
+	n.staticUsers = staticUsers
+	n.authUUIDs = authUUIDs
 	n.access.Unlock()
-	if err := updateManagedPanelUsers(n.inbound, names, credentials, passwords); err != nil {
+	var updateErr error
+	if !n.staticInbound {
+		updateErr = updateManagedPanelUsers(n.inbound, names, credentials, passwords)
+	}
+	if err := updateErr; err != nil {
 		n.access.Lock()
 		n.users, n.userPanels = previousUsers, previousPanels
+		n.staticUsers = previousStaticUsers
+		n.authUUIDs = previousAuthUUIDs
 		n.access.Unlock()
 		if n.control != nil {
 			if rollbackErr := n.control.UpdateUsers(n.limits); rollbackErr != nil {

@@ -23,6 +23,7 @@ type XBoardServiceOptions struct {
 	NodeID               int                               `json:"node_id,omitempty"`
 	NodeType             string                            `json:"node_type,omitempty"`
 	Inbound              string                            `json:"inbound,omitempty"`
+	StaticInbound        bool                              `json:"static_inbound,omitempty"`
 	Servers              *badjson.TypedMap[string, string] `json:"servers,omitempty"`
 	PullInterval         badoption.Duration                `json:"pull_interval,omitempty"`
 	PushInterval         badoption.Duration                `json:"push_interval,omitempty"`
@@ -72,7 +73,9 @@ type XBoardAutoInboundOptions struct {
 	ForceMux          bool   `json:"force_mux,omitempty"`
 	ServerPadding     bool   `json:"server_padding,omitempty"`
 	PaddingScheme     string `json:"padding_scheme,omitempty"`
+	MasterPassword    string `json:"master_password,omitempty"`
 	ShadowsocksObfsMu string `json:"shadowsocks_obfs_mu,omitempty"`
+	ShadowsocksBanIP  bool   `json:"shadowsocks_ban_ip,omitempty"`
 	CertificatePath   string `json:"certificate_path,omitempty"`
 	KeyPath           string `json:"key_path,omitempty"`
 	PrivateKey        string `json:"private_key,omitempty"`

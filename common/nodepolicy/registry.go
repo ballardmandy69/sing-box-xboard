@@ -31,10 +31,15 @@ type Rule struct {
 // @author lyt
 // @date 2026-10-29
 type Node struct {
-	LookupUser func(string) (User, bool)
-	Rules      []Rule
-	OnBlocked  func(context.Context, adapter.InboundContext, uint64, string)
-	OnIllegal  func(uint64, int)
+	LookupUser       func(string) (User, bool)
+	Static           bool
+	LookupStaticUser func(string) (User, bool)
+	LookupAuthUUID   func(string) (string, bool)
+	CheckRequest     func(context.Context, string) error
+	TrackConnection  func(context.Context, net.Conn, adapter.InboundContext) (net.Conn, error)
+	Rules            []Rule
+	OnBlocked        func(context.Context, adapter.InboundContext, uint64, string)
+	OnIllegal        func(uint64, int)
 }
 
 type compiledRule struct {
@@ -44,6 +49,7 @@ type compiledRule struct {
 
 type nodeSnapshot struct {
 	Node
+	tag   string
 	rules []compiledRule
 }
 
@@ -53,6 +59,7 @@ type nodeSnapshot struct {
 type Registry struct {
 	access  sync.RWMutex
 	nodes   map[string]*nodeSnapshot
+	aliases map[string]string
 	scanner *Scanner
 	cleaner *usercontrol.ConnectionCleaner
 }
@@ -64,14 +71,15 @@ func NewRegistry(expression string, cleaner *usercontrol.ConnectionCleaner) (*Re
 	if err != nil {
 		return nil, err
 	}
-	return &Registry{nodes: make(map[string]*nodeSnapshot), scanner: scanner, cleaner: cleaner}, nil
+	return &Registry{nodes: make(map[string]*nodeSnapshot), aliases: make(map[string]string),
+		scanner: scanner, cleaner: cleaner}, nil
 }
 
 func (r *Registry) Register(tag string, node Node) error {
 	if tag == "" || node.LookupUser == nil {
 		return fmt.Errorf("managed node policy requires an inbound tag and user lookup")
 	}
-	snapshot := &nodeSnapshot{Node: node, rules: make([]compiledRule, 0, len(node.Rules))}
+	snapshot := &nodeSnapshot{Node: node, tag: tag, rules: make([]compiledRule, 0, len(node.Rules))}
 	snapshot.Node.Rules = nil
 	for _, rule := range node.Rules {
 		pattern, err := regexp.Compile(rule.Pattern)
@@ -93,27 +101,29 @@ func (r *Registry) Remove(tag string) {
 }
 
 func (r *Registry) HasNode(tag string) bool {
-	r.access.RLock()
-	_, exists := r.nodes[tag]
-	r.access.RUnlock()
-	return exists
+	node, _ := r.lookupNode(tag)
+	return node != nil
 }
 
 func (r *Registry) FingerprintEnabled() bool { return r.scanner != nil }
 
 func (r *Registry) Check(ctx context.Context, metadata *adapter.InboundContext, conn net.Conn) error {
-	r.access.RLock()
-	node := r.nodes[metadata.Inbound]
-	r.access.RUnlock()
+	node, static := r.lookupNode(metadata.Inbound)
 	if node == nil {
 		return nil
 	}
-	user, exists := node.LookupUser(metadata.User)
+	user, exists := r.lookupUser(node, static, metadata.Inbound, metadata.User)
 	if !exists {
 		// A stream admitted before a user refresh may reach routing after removal.
 		// Deliberately fail closed here instead of preserving the sample's bypass.
 		return adapter.ErrManagedNodePolicyRejected
 	}
+	return r.checkUserPolicy(ctx, metadata, conn, node, user)
+}
+
+func (r *Registry) checkUserPolicy(ctx context.Context, metadata *adapter.InboundContext,
+	conn net.Conn, node *nodeSnapshot, user User,
+) error {
 	if reason := r.scanner.MustCheck(metadata, metadata.TLSFingerprint, user.ID); reason != "" {
 		if node.OnBlocked != nil {
 			node.OnBlocked(ctx, *metadata, user.ID, "gfw:"+reason)

@@ -50,7 +50,7 @@ func TestManagedPolicyAfterLegacySniffBeforeRulesAndOnDemand(t *testing.T) {
 			metadata.Inbound, metadata.User = "panel-node", "panel-identity"
 			metadata.Destination = M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 8443}
 			metadata.LegacyInboundOptions = option.InboundOptions{SniffEnabled: true, SniffOverrideDestination: true}
-			_, _, buffers, packets, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, useTLS), nil)
+			_, _, buffers, packets, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, useTLS), nil, nil)
 			require.ErrorIs(t, err, adapter.ErrManagedNodePolicyRejected)
 			require.True(t, R.IsRejected(err))
 			require.Empty(t, buffers, "rejected sniff buffers must be released")
@@ -80,7 +80,7 @@ func TestManagedPolicyAfterExplicitDomainStrategy(t *testing.T) {
 	metadata := onDemandMetadata()
 	metadata.Inbound, metadata.User = "panel-node", "panel-identity"
 	metadata.LegacyInboundOptions.DomainStrategy = option.DomainStrategy(C.DomainStrategyIPv4Only)
-	_, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+	_, _, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 	require.ErrorIs(t, err, adapter.ErrManagedNodePolicyRejected)
 	require.Equal(t, int32(1), queries.Load())
 	require.Equal(t, []netip.Addr{netip.MustParseAddr("192.0.2.10")}, observed.DestinationAddresses)
@@ -97,7 +97,7 @@ func TestManagedPolicyRunsOnceAcrossOnDemandRetry(t *testing.T) {
 	}})
 	metadata := onDemandMetadata()
 	metadata.Inbound, metadata.User = "panel-node", "panel-identity"
-	rule, _, buffers, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+	rule, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 	defer buf.ReleaseMulti(buffers)
 	require.NoError(t, err)
 	require.Same(t, r.rules[0], rule)
@@ -137,7 +137,7 @@ func TestManagedScannerDoesNotForceSniff(t *testing.T) {
 	})
 	metadata := onDemandMetadata()
 	metadata.Inbound, metadata.User = "panel-node", "panel-identity"
-	_, _, _, _, err := r.matchRule(r.ctx, &metadata, &managedUnreadableConn{t: t}, nil)
+	_, _, _, _, _, err := r.matchRule(r.ctx, &metadata, &managedUnreadableConn{t: t}, nil, nil)
 	require.ErrorIs(t, err, adapter.ErrManagedNodePolicyRejected)
 	require.Zero(t, queries.Load())
 	require.Empty(t, metadata.TLSFingerprint)

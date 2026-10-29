@@ -26,6 +26,8 @@ type MultiService[U comparable] struct {
 	methodMap    map[U]*Method
 	hotMethodMap map[U]*Method
 	hotCallback  func(U)
+	authFailure  func(M.Socksaddr)
+	authBlocked  func(M.Socksaddr) bool
 	handler      shadowsocks.Handler
 	udpNat       *udpnat.Service[netip.AddrPort]
 }
@@ -102,6 +104,13 @@ func (s *MultiService[U]) SetHotUserCallback(callback func(U)) {
 	s.access.Unlock()
 }
 
+// SetAuthenticationFailureHooks installs an optional source policy for unknown-user attempts.
+func (s *MultiService[U]) SetAuthenticationFailureHooks(report func(M.Socksaddr), blocked func(M.Socksaddr) bool) {
+	s.access.Lock()
+	s.authFailure, s.authBlocked = report, blocked
+	s.access.Unlock()
+}
+
 func (s *MultiService[U]) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
 	err := s.newConnection(ctx, conn, metadata)
 	if err != nil {
@@ -115,7 +124,11 @@ func (s *MultiService[U]) newConnection(ctx context.Context, conn net.Conn, meta
 	methodMap := s.methodMap
 	hotMethodMap := s.hotMethodMap
 	hotCallback := s.hotCallback
+	authFailure, authBlocked := s.authFailure, s.authBlocked
 	s.access.RUnlock()
+	if authBlocked != nil && authBlocked(metadata.Source) {
+		return E.New("source blocked by authentication failure policy")
+	}
 	hint, hasHint := shadowsocks.UserHintFromContext[U](ctx)
 	if hasHint {
 		method, exists := methodMap[hint]
@@ -177,6 +190,10 @@ func (s *MultiService[U]) newConnection(ctx context.Context, conn net.Conn, meta
 		}
 	}
 	if err != nil {
+		// The original explicit user-hint branch does not report failed authentication.
+		if !hasHint && authFailure != nil {
+			authFailure(metadata.Source)
+		}
 		return err
 	}
 	if cold && !hasHint && hotCallback != nil {

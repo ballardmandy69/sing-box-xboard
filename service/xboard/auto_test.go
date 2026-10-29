@@ -86,7 +86,6 @@ func TestAutoInboundRejectsInvalidPanelSettings(t *testing.T) {
 		{name: "mismatched protocol", body: `{"server_port":443,"protocol":"trojan"}`},
 		{name: "websocket", body: `{"server_port":443,"network":"ws"}`},
 		{name: "grpc", body: `{"server_port":443,"network":"grpc"}`},
-		{name: "transport settings", body: `{"server_port":443,"networkSettings":{"path":"/"}}`},
 		{name: "malformed tls mode", body: `{"server_port":443,"tls":true}`},
 	}
 	for _, test := range tests {

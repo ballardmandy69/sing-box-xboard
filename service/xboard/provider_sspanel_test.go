@@ -581,8 +581,8 @@ func TestSSPanelAutomaticProtocolAndTransportMapping(t *testing.T) {
 		t.Fatal("SSPanel security omission unexpectedly enabled TLS")
 	}
 	if options.Transport.WebsocketOptions.Path != "/socket" ||
-		!reflect.DeepEqual([]string(options.Transport.WebsocketOptions.Headers["Host"]), []string{"cover.example"}) {
-		t.Fatalf("WebSocket host/path not mapped: %+v", options.Transport.WebsocketOptions)
+		len(options.Transport.WebsocketOptions.Headers) != 0 {
+		t.Fatalf("WebSocket path or ignored panel headers changed: %+v", options.Transport.WebsocketOptions)
 	}
 	provider, _ = newSSPanelProvider("anytls")
 	p = provider.(*sspanelProvider)

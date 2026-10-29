@@ -337,6 +337,9 @@ func New(options Options) (*Box, error) {
 		} else {
 			tag = F.ToString(i)
 		}
+		if inboundOptions.UsePanelTag != "" {
+			policies.SetPanelTag(tag, inboundOptions.UsePanelTag)
+		}
 		err = inboundManager.Create(
 			ctx,
 			router,

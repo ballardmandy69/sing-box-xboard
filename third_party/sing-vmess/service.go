@@ -45,12 +45,23 @@ var (
 
 type Service[U comparable] struct {
 	users                atomic.Pointer[serviceUsers[U]]
+	authHooks            atomic.Pointer[authenticationFailureHooks]
 	replayFilter         replay.Filter
 	handler              Handler
 	time                 func() time.Time
 	disableHeaderProtect bool
 	alterIdUpdateTask    *time.Ticker
 	alterIdUpdateDone    chan struct{}
+}
+
+type authenticationFailureHooks struct {
+	report  func(M.Socksaddr)
+	blocked func(M.Socksaddr) bool
+}
+
+// SetAuthenticationFailureHooks installs an optional policy before identity recognition.
+func (s *Service[U]) SetAuthenticationFailureHooks(report func(M.Socksaddr), blocked func(M.Socksaddr) bool) {
+	s.authHooks.Store(&authenticationFailureHooks{report: report, blocked: blocked})
 }
 
 // serviceUsers is immutable after publication; a handshake retains one complete user generation.
@@ -218,6 +229,10 @@ func (s *Service[U]) buildLegacyKeys(users *serviceUsers[U]) {
 }
 
 func (s *Service[U]) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
+	hooks := s.authHooks.Load()
+	if hooks != nil && hooks.blocked != nil && hooks.blocked(source) {
+		return E.New("source blocked by authentication failure policy")
+	}
 	users := s.users.Load()
 	const headerLenBufferLen = 2 + CipherOverhead
 	const aeadMinHeaderLen = 16 + headerLenBufferLen + 8 + CipherOverhead + 42
@@ -263,6 +278,9 @@ func (s *Service[U]) NewConnection(ctx context.Context, conn net.Conn, source M.
 		}
 	}
 	if !found {
+		if hooks != nil && hooks.report != nil {
+			hooks.report(source)
+		}
 		return ErrBadRequest
 	}
 

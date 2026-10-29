@@ -43,6 +43,10 @@ type Service struct {
 
 type node struct {
 	debugTag        string
+	panelTag        string
+	staticInbound   bool
+	staticUsers     map[string]string
+	authUUIDs       map[string]string
 	service         *Service
 	inbound         adapter.ManagedSSMServer
 	traffic         *ssmapi.TrafficManager
@@ -116,6 +120,9 @@ type configResponse struct {
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.XBoardServiceOptions) (adapter.Service, error) {
+	if options.StaticInbound && options.AutoInbound != nil {
+		return nil, E.New("static_inbound and auto_inbound cannot be enabled together")
+	}
 	serverEntries := make(map[string]string)
 	if options.Servers != nil {
 		for _, entry := range options.Servers.Entries() {
@@ -125,11 +132,14 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 	if len(serverEntries) == 0 && options.Inbound != "" {
 		serverEntries["default"] = options.Inbound
 	}
+	if len(serverEntries) == 0 && options.StaticInbound && tag != "" {
+		serverEntries["default"] = tag
+	}
 	if len(serverEntries) == 0 {
 		return nil, E.New("missing servers or inbound")
 	}
 	inboundManager := service.FromContext[adapter.InboundManager](ctx)
-	if inboundManager == nil {
+	if inboundManager == nil && !options.StaticInbound {
 		return nil, E.New("missing inbound manager")
 	}
 	pullInterval := time.Duration(options.PullInterval)
@@ -160,6 +170,9 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		logger:  logger,
 	}
 	s.policy, _ = service.FromContext[adapter.ManagedNodePolicy](ctx).(*nodepolicy.Registry)
+	if options.StaticInbound && s.policy == nil {
+		return nil, E.New("static_inbound requires the panel route registry")
+	}
 	legacyOptions := service.PtrFromContext[option.NYAFWOptions](ctx)
 	var hotSeconds int64
 	if legacyOptions != nil {
@@ -177,7 +190,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		if err != nil {
 			return nil, err
 		}
-		accessTracker = &accessLogTracker{queues: make(map[string]*accessLogQueue)}
+		accessTracker = &accessLogTracker{queues: make(map[string]*accessLogQueue), policy: s.policy}
 	}
 	for key, inboundTag := range serverEntries {
 		if err := checkInboundOwnership(ctx, s, inboundTag); err != nil {
@@ -198,6 +211,8 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		}
 		node := &node{
 			debugTag:        debugTag,
+			panelTag:        inboundTag,
+			staticInbound:   options.StaticInbound,
 			service:         s,
 			traffic:         ssmapi.NewTrafficManager(),
 			limits:          make(map[string]usercontrol.Limits),
@@ -215,27 +230,29 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			reportAlive:     options.ReportAlive,
 			users:           make(map[string]uint64),
 		}
-		inbound, loaded := inboundManager.Get(inboundTag)
-		if _, owned := inbound.(*autoInbound); loaded && owned {
-			return nil, E.New("xboard inbound ", inboundTag, " already belongs to another panel node")
-		}
-		if !loaded {
-			if options.AutoInbound == nil {
-				return nil, E.New("xboard inbound ", inboundTag, " not found")
+		if !options.StaticInbound {
+			inbound, loaded := inboundManager.Get(inboundTag)
+			if _, owned := inbound.(*autoInbound); loaded && owned {
+				return nil, E.New("xboard inbound ", inboundTag, " already belongs to another panel node")
 			}
-			var err error
-			inbound, err = node.createInbound(ctx, inboundManager, inboundTag, *options.AutoInbound)
-			if err != nil {
-				return nil, E.Cause(err, "create xboard inbound ", inboundTag)
+			if !loaded {
+				if options.AutoInbound == nil {
+					return nil, E.New("xboard inbound ", inboundTag, " not found")
+				}
+				var err error
+				inbound, err = node.createInbound(ctx, inboundManager, inboundTag, *options.AutoInbound)
+				if err != nil {
+					return nil, E.Cause(err, "create xboard inbound ", inboundTag)
+				}
 			}
-		}
-		managed, ok := inbound.(adapter.ManagedSSMServer)
-		if !ok {
-			return nil, E.New("inbound/", inbound.Type(), "[", inbound.Tag(), "] is not managed")
-		}
-		node.inbound = managed
-		if hotManager, ok := managed.(adapter.HotUserManager); ok {
-			node.hotUsers = newHotUsers(hotManager, hotTTL)
+			managed, ok := inbound.(adapter.ManagedSSMServer)
+			if !ok {
+				return nil, E.New("inbound/", inbound.Type(), "[", inbound.Tag(), "] is not managed")
+			}
+			node.inbound = managed
+			if hotManager, ok := managed.(adapter.HotUserManager); ok {
+				node.hotUsers = newHotUsers(hotManager, hotTTL)
+			}
 		}
 		trafficFactor := options.TrafficFactor
 		if trafficFactor <= 0 {
@@ -244,7 +261,9 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		node.trafficFactor = trafficFactor
 		node.control = usercontrol.NewManagerWithRequestLimit(node.traffic, options.RateLimit)
 		node.control.SetConnectionCleaner(service.PtrFromContext[usercontrol.ConnectionCleaner](ctx))
-		managed.SetTracker(node.control)
+		if node.inbound != nil && s.policy == nil {
+			node.inbound.SetTracker(node.control)
+		}
 		if accessTracker != nil {
 			node.accessLog = newAccessLogQueue(legacyOptions.AccessLog, accessClient)
 			accessTracker.queues[inboundTag] = node.accessLog
@@ -272,7 +291,7 @@ func checkInboundOwnership(ctx context.Context, current *Service, tag string) er
 			continue
 		}
 		for _, node := range owner.nodes {
-			if node.inbound != nil && node.inbound.Tag() == tag {
+			if node.policyTag() == tag {
 				return E.New("xboard inbound ", tag, " is already managed by another panel node")
 			}
 		}

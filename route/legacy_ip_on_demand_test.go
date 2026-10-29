@@ -133,7 +133,7 @@ func TestIPOnDemandNetworkLookupAndTerminalRules(t *testing.T) {
 			} else if test.resolved {
 				metadata.DestinationAddresses = []netip.Addr{netip.MustParseAddr(test.address)}
 			}
-			rule, index, buffers, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+			rule, index, buffers, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 			defer buf.ReleaseMulti(buffers)
 			require.NoError(t, err)
 			require.Equal(t, test.queries, queries.Load())
@@ -152,7 +152,7 @@ func TestIPOnDemandLookupFailure(t *testing.T) {
 		t.Run(mDNS.RcodeToString[rcode], func(t *testing.T) {
 			r, queries := onDemandNetworkRouter(t, true, "", rcode)
 			metadata := onDemandMetadata()
-			_, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+			_, _, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 			require.ErrorContains(t, err, "ip_on_demand: resolve lookup.example")
 			require.Equal(t, int32(1), queries.Load())
 		})
@@ -173,7 +173,7 @@ func TestIPOnDemandSniffRestoresOriginalIP(t *testing.T) {
 			defer client.Close()
 			defer server.Close()
 			go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: sniff.example\r\n\r\n")) }()
-			rule, _, buffers, _, err := r.matchRule(r.ctx, &metadata, server, nil)
+			rule, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, server, nil, nil)
 			defer buf.ReleaseMulti(buffers)
 			require.NoError(t, err)
 			require.Same(t, r.rules[1], rule)
@@ -218,7 +218,7 @@ func TestIPOnDemandSniffFallbackBoundaries(t *testing.T) {
 			defer client.Close()
 			defer server.Close()
 			go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: sniff.example\r\n\r\n")) }()
-			rule, _, buffers, _, err := r.matchRule(r.ctx, &metadata, server, nil)
+			rule, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, server, nil, nil)
 			defer buf.ReleaseMulti(buffers)
 			require.Equal(t, int32(1), queries.Load())
 			require.Equal(t, 1, sniffRule.matches)
@@ -245,7 +245,7 @@ func TestIPOnDemandDoesNotResolveProxyUDP(t *testing.T) {
 	r, queries := onDemandNetworkRouter(t, true, "192.0.2.10", mDNS.RcodeSuccess)
 	metadata := onDemandMetadata()
 	metadata.Network = N.NetworkUDP
-	_, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+	_, _, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 	require.NoError(t, err)
 	require.Zero(t, queries.Load())
 }
@@ -287,7 +287,7 @@ func TestIPOnDemandDoesNotReplayActions(t *testing.T) {
 	second := &onDemandCountingRule{Rule: r.rules[1]}
 	r.rules[0], r.rules[1] = first, second
 	metadata := onDemandMetadata()
-	rule, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+	rule, _, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 	require.NoError(t, err)
 	require.Same(t, r.rules[2], rule)
 	require.Equal(t, uint16(8443), metadata.Destination.Port)

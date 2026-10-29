@@ -156,8 +156,14 @@ Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新�
 `codex/nyafw-full-parity` 中的当前源码已进一步接入下列能力，尚未发布对应版本；
 上文固定版本的安装命令仍安装 v2，不能把开发分支选项当作 v2 已有功能。
 
+开发分支安装器在 `zq.key`、`zq.crt`、`zq.pem` 均不存在时，使用 OpenSSL 生成与原脚本一致的
+P-256、365 天、空 subject 自签证书；合并文件顺序为证书后接私钥，三个文件权限均为 `0600`。
+已有证书和私钥保持不变，仅缺 `zq.pem` 时从原文件重建；不完整的密钥/证书组合会明确报错。
+配置检查或安装失败会移除本次新生成的文件。首次安装仍保留空 Nodes、不自动启动服务；
+Native 的独立密钥仍在添加该协议时生成。使用自签证书时，客户端需配置对应的证书信任。
+
 - TCP VMess、VLESS、Shadowsocks 和 SS2022 的自动面板节点；支持的 WS、HTTPUpgrade、gRPC 组合有真实客户端测试。
-- UniProxy `MultiApiConfig` 聚合、全局与用户限速、IP/连接数/请求配额、ReportAlive。
+- `MultiApiConfig` 聚合四种 provider、全局与用户限速、IP/连接数/请求配额、ReportAlive。
 - 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
 - MemoryGuard 按系统可用内存关闭选中来源 IP 的连接，并按配置时长拒绝其新 TCP 连接。
 - `debug.listen` 提供原版的内存、连接榜、pprof、GC 和热用户缓存查询接口。
@@ -168,6 +174,9 @@ Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新�
 - `AcceptAnyTLS`、`FallbackService` 同端口组合，Trojan `ForceMux` / `ServerPadding` 和全局 SingMux 分发。
 - `TLSJson` 原字段覆盖、静态证书 `SniPolicy`、默认嗅探和本地 `VLESS` 选择。
 - SSPanel 检测规则与违规批量上报，失败保留批次，在下次同步时重试。
+- `MasterPassword` 按原版方式为自动 Trojan/AnyTLS 派生凭据，组合 AnyTLS 入口统一生效。
+- `ShadowsocksBanIP` 为传统 SS 多用户和 VMess 入口提供共享来源 IP 的认证失败封禁。
+- `StaticInbound` 配合 JSON `use_panel_tag` 关联面板，保持静态认证表；Mux/detour 按最终逻辑流计费。
 
 当前源码的 `check` 不访问面板；运行后先同步用户、再同步节点配置，成功后才开放监听。
 首次同步失败会退避重试。安装烟测覆盖配置离线检查与真实节点进程启动两部分。
@@ -194,6 +203,25 @@ MemoryGuard:
 `/sb/debug/users?tag=面板标签` 查看热用户过期时间；multi 使用节点 `ApiConfig.PanelTag`，
 并非 `MultiApiConfig` 中首个面板的标签。`debug.listen` 省略时不会开放这些接口。
 
+`MasterPassword` 设置在节点级。自动 Trojan/AnyTLS 的客户端凭据为
+`MD5(面板原始 UUID + MasterPassword)` 的小写十六进制，拼接不增加分隔符、不去除空白。
+组合 AnyTLS 入口的子协议使用同一个派生值。空 MasterPassword 使用原凭据；
+Native、VMess、独立 VLESS 和 Shadowsocks 保持各自的凭据处理。
+
+`ShadowsocksBanIP` 可以设置在根级或节点级，两者取 OR。
+启用的传统 SS 多用户和 VMess 入口共用来源 IP 计数，第三次候选读取/认证失败后封禁，
+按 Unix 整数秒加 60 过期；SS2022、共享密码 obfs 和其他协议不启用。
+使用 PROXY protocol 时，计数依据解析后的客户端来源 IP。
+
+所选 nyafw 原样本的 `CertConfig` 只有 `CertFile`、`KeyFile`、`SniPolicy`。
+它的 ACME 分支返回不支持错误，本分支的标准构建也不提供自动证书签发。
+
+静态模式将 YAML 节点设为 `StaticInbound: true`，JSON 入站设为
+`"use_panel_tag": "对应的 ApiConfig.PanelTag"`。静态 `users[].name` 应填写面板原 UUID，
+`password` 可自行设置。静态模式仅关联规则、限额、计费和日志，认证表保留在 JSON 中。
+一个面板可关联多个静态入站；没有监听时该节点仍执行面板同步。
+不设置 StaticInbound 的既有手工托管用法会继续更新协议认证表。
+
 所有代理 UDP 协议和 UDP 转发均排除，内部 DNS 保留配置语义。
-仍在补齐 MasterPassword、ShadowsocksBanIP、StaticInbound 的完整行为；详细进度及证据限制见
+详细进度及证据限制见
 [完整复现清单](nyafw-parity.md)。完成原版运行对照前，不称为完整兼容版。

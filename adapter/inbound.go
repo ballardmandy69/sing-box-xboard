@@ -54,6 +54,9 @@ type InboundContext struct {
 	User        string
 	Outbound    string
 
+	managedNodePanel  string
+	managedNodeUserID uint64
+
 	LegacyInboundOptions option.InboundOptions
 
 	// power report

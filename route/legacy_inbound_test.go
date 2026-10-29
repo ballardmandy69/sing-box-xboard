@@ -47,7 +47,7 @@ func TestLegacyInboundSniffBeforeRules(t *testing.T) {
 			metadata := onDemandMetadata()
 			metadata.Destination = M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 8443}
 			metadata.LegacyInboundOptions = option.InboundOptions{SniffEnabled: true, SniffOverrideDestination: override}
-			rule, _, buffers, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, useTLS), nil)
+			rule, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, useTLS), nil, nil)
 			buf.ReleaseMulti(buffers)
 			require.NoError(t, err)
 			require.Same(t, r.rules[0], rule)
@@ -68,7 +68,7 @@ func TestLegacyInboundSniffDoesNotOverrideClientDomain(t *testing.T) {
 	r, queries := onDemandNetworkRouter(t, false, "192.0.2.10", mDNS.RcodeSuccess)
 	metadata := onDemandMetadata()
 	metadata.LegacyInboundOptions = option.InboundOptions{SniffEnabled: true, SniffOverrideDestination: true}
-	_, _, buffers, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, true), nil)
+	_, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, true), nil, nil)
 	defer buf.ReleaseMulti(buffers)
 	require.NoError(t, err)
 	require.Equal(t, "lookup.example", metadata.Destination.Fqdn)
@@ -82,7 +82,7 @@ func TestLegacyInboundSniffIPOnDemandRecovery(t *testing.T) {
 	metadata := onDemandMetadata()
 	metadata.Destination = M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 443}
 	metadata.LegacyInboundOptions = option.InboundOptions{SniffEnabled: true, SniffOverrideDestination: true}
-	rule, _, buffers, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, false), nil)
+	rule, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, false), nil, nil)
 	defer buf.ReleaseMulti(buffers)
 	require.NoError(t, err)
 	require.Same(t, r.rules[0], rule)
@@ -119,7 +119,7 @@ func TestLegacyInboundDomainStrategyPrecedesRules(t *testing.T) {
 		r.dns = recorder
 		metadata := onDemandMetadata()
 		metadata.LegacyInboundOptions.DomainStrategy = option.DomainStrategy(strategy)
-		rule, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+		rule, _, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 		require.NoError(t, err)
 		require.Same(t, r.rules[0], rule)
 		require.Equal(t, strategy, recorder.strategy)
@@ -137,7 +137,7 @@ func TestLegacyInboundDomainStrategyFailureAndExistingAddresses(t *testing.T) {
 		if existing {
 			metadata.DestinationAddresses = []netip.Addr{netip.MustParseAddr("192.0.2.10")}
 		}
-		_, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil)
+		_, _, _, _, _, err := r.matchRule(r.ctx, &metadata, nil, nil, nil)
 		if existing {
 			require.NoError(t, err)
 			require.Equal(t, []netip.Addr{netip.MustParseAddr("192.0.2.10")}, metadata.DestinationAddresses)
@@ -153,7 +153,7 @@ func TestLegacyInboundSniffBuffersReleasedWhenLaterActionFails(t *testing.T) {
 	onDemandRules(t, r, `[{"action":"resolve"}]`)
 	metadata := onDemandMetadata()
 	metadata.LegacyInboundOptions = option.InboundOptions{SniffEnabled: true}
-	_, _, buffers, packetBuffers, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, false), nil)
+	_, _, buffers, packetBuffers, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, false), nil, nil)
 	require.Error(t, err)
 	require.Empty(t, buffers)
 	require.Empty(t, packetBuffers)
@@ -181,7 +181,7 @@ func TestLegacyInboundSniffTimeoutAndReverseMapping(t *testing.T) {
 		metadata.LegacyInboundOptions = option.InboundOptions{SniffEnabled: true, SniffTimeout: badoption.Duration(timeout)}
 		conn := &legacyDeadlineConn{Conn: legacySniffInput(t, false)}
 		before := time.Now()
-		_, _, buffers, _, err := r.matchRule(r.ctx, &metadata, conn, nil)
+		_, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, conn, nil, nil)
 		defer buf.ReleaseMulti(buffers)
 		require.NoError(t, err)
 		expected := timeout
@@ -243,7 +243,7 @@ func TestLegacyInboundFakeIPMappingPrecedesSniffAndLookup(t *testing.T) {
 		SniffEnabled: true, SniffOverrideDestination: true,
 		DomainStrategy: option.DomainStrategy(C.DomainStrategyIPv4Only),
 	}
-	_, _, buffers, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, true), nil)
+	_, _, buffers, _, _, err := r.matchRule(r.ctx, &metadata, legacySniffInput(t, true), nil, nil)
 	defer buf.ReleaseMulti(buffers)
 	require.NoError(t, err)
 	require.True(t, metadata.FakeIP)

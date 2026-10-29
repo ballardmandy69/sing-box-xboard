@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/authban"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
@@ -76,6 +77,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	}
 	service := vmess.NewService[inboundUserIdentity](adapter.NewUpstreamContextHandler(inbound.newConnectionEx, inbound.newPacketConnectionEx), serviceOptions...)
 	inbound.service = service
+	if options.ShadowsocksBanIP {
+		policy := authban.Shared()
+		service.SetAuthenticationFailureHooks(policy.ReportFailure, policy.IsBlocked)
+	}
 	err = service.UpdateUsers(common.MapIndexed(options.Users, func(index int, it option.VMessUser) inboundUserIdentity {
 		return inboundUserIdentity{Name: it.Name, Index: index}
 	}), common.Map(options.Users, func(it option.VMessUser) string {

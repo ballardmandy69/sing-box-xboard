@@ -18,7 +18,6 @@ import (
 	"github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/bufio/deadline"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
@@ -68,7 +67,9 @@ func (r *Router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	}
 }
 
-func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) error {
+func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext,
+	onClose N.CloseHandlerFunc,
+) (err error) {
 	if isUDPOverTCPDestination(metadata.Destination.Fqdn) {
 		return C.ErrUDPDisabled
 	}
@@ -102,10 +103,23 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		N.CloseOnHandshakeFailure(conn, onClose, r.hijackDNSStream(ctx, conn, metadata))
 		return nil
 	}
+	var nodeRequest adapter.ManagedNodeRequest
+	if tracker, ok := service.FromContext[adapter.ManagedNodePolicy](r.ctx).(adapter.ManagedNodeTracker); ok {
+		if nodeRequest, err = tracker.CheckNodeRequest(ctx, &metadata); err != nil {
+			return &R.RejectedError{Cause: err}
+		}
+	}
 	if deadline.NeedAdditionalReadDeadline(conn) {
 		conn = deadline.NewConn(conn)
 	}
-	selectedRule, _, buffers, _, err := r.matchRule(ctx, &metadata, conn, nil)
+	// Matching may add the node's accounting wrapper before a later route action fails.
+	// Close that returned wrapper, not just the original protocol socket, on every error.
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
+	selectedRule, _, buffers, _, conn, err := r.matchRule(ctx, &metadata, conn, nil, nodeRequest)
 	if err != nil {
 		return err
 	}
@@ -139,15 +153,17 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 			}
 		case *R.RuleActionReject:
 			buf.ReleaseMulti(buffers)
+			conn.Close()
 			if action.Method == C.RuleActionRejectMethodReply {
 				return E.New("reject method `reply` is not supported for TCP connections")
 			}
 			return action.Error(ctx)
 		case *R.RuleActionHijackDNS:
 			for _, buffer := range buffers {
-				conn = bufio.NewCachedConn(conn, buffer)
+				conn = newCachedConn(conn, buffer)
 			}
 			N.CloseOnHandshakeFailure(conn, onClose, r.hijackDNSStream(ctx, conn, metadata))
+			conn.Close()
 			return nil
 		}
 	}
@@ -161,7 +177,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	}
 
 	for _, buffer := range buffers {
-		conn = bufio.NewCachedConn(conn, buffer)
+		conn = newCachedConn(conn, buffer)
 	}
 	if selectedRule != nil {
 		metadata.RouteRule = selectedRule.String()
@@ -221,7 +237,7 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	if metadata.InboundType == C.TypeTun && metadata.Protocol == C.ProtocolDNS {
 		return r.hijackDNSPacket(ctx, conn, nil, metadata, onClose)
 	}
-	selectedRule, _, _, packetBuffers, err := r.matchRule(ctx, &metadata, nil, conn)
+	selectedRule, _, _, packetBuffers, _, err := r.matchRule(ctx, &metadata, nil, conn, nil)
 	if err != nil {
 		return err
 	}
@@ -544,10 +560,12 @@ func (r *Router) applyReverseMapping(ctx context.Context, metadata *adapter.Inbo
 func (r *Router) matchRule(
 	ctx context.Context, metadata *adapter.InboundContext,
 	inputConn net.Conn, inputPacketConn N.PacketConn,
+	nodeRequest adapter.ManagedNodeRequest,
 ) (
 	selectedRule adapter.Rule, selectedRuleIndex int,
-	buffers []*buf.Buffer, packetBuffers []*N.PacketBuffer, fatalErr error,
+	buffers []*buf.Buffer, packetBuffers []*N.PacketBuffer, routedConn net.Conn, fatalErr error,
 ) {
+	routedConn = inputConn
 	defer func() {
 		if fatalErr != nil {
 			buf.ReleaseMulti(buffers)
@@ -571,9 +589,34 @@ func (r *Router) matchRule(
 	}
 	if policy := service.FromContext[adapter.ManagedNodePolicy](r.ctx); metadata.Network == N.NetworkTCP &&
 		policy != nil {
-		if policyErr := policy.Check(ctx, metadata, inputConn); policyErr != nil {
+		checkPolicy := policy.Check
+		if nodeRequest != nil {
+			checkPolicy = nodeRequest.CheckPolicy
+		}
+		if policyErr := checkPolicy(ctx, metadata, inputConn); policyErr != nil {
 			fatalErr = &R.RejectedError{Cause: policyErr}
 			return
+		}
+		if tracker, ok := policy.(adapter.ManagedNodeTracker); ok && inputConn != nil {
+			// Legacy sniffing ran before accounting. Replay its bytes through the wrapper once.
+			// Any later route-action sniffing already reads the wrapped stream, so its own
+			// buffers remain outside that wrapper when the selected outbound consumes them.
+			for _, buffer := range buffers {
+				inputConn = newCachedConn(inputConn, buffer)
+			}
+			buffers = nil
+			routedConn = inputConn
+			trackConnection := tracker.TrackNodeConnection
+			if nodeRequest != nil {
+				trackConnection = nodeRequest.TrackConnection
+			}
+			tracked, trackErr := trackConnection(ctx, inputConn, metadata)
+			if trackErr != nil {
+				fatalErr = &R.RejectedError{Cause: trackErr}
+				return
+			}
+			inputConn = tracked
+			routedConn = tracked
 		}
 	}
 	onDemandPending := r.ipOnDemand && metadata.Network == N.NetworkTCP

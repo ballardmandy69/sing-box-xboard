@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/authban"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/uot"
@@ -105,6 +106,12 @@ func newMultiInbound(ctx context.Context, router adapter.Router, logger log.Cont
 		return nil, err
 	}
 	inbound.service = service
+	if options.ShadowsocksBanIP {
+		if legacy, ok := service.(*shadowaead.MultiService[multiUserIdentity]); ok {
+			policy := authban.Shared()
+			legacy.SetAuthenticationFailureHooks(policy.ReportFailure, policy.IsBlocked)
+		}
+	}
 	if len(options.Users) > 0 {
 		err = inbound.UpdateUsers(common.Map(options.Users, func(user option.ShadowsocksUser) string {
 			return user.Name

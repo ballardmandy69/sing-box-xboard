@@ -79,9 +79,14 @@ func (r autoConfigResponse) buildInboundConfig(nodeType string,
 		return autoInboundConfig{}, err
 	}
 	listen := inboundOptions.(option.ListenOptionsWrapper).TakeListenOptions()
+	var masterPassword string
+	if protocol == C.TypeTrojan || protocol == C.TypeAnyTLS {
+		masterPassword = auto.MasterPassword
+	}
 	return autoInboundConfig{
 		protocol: protocol, options: inboundOptions,
-		endpoint: netip.AddrPortFrom(listen.Listen.Build(netip.IPv4Unspecified()), listen.ListenPort),
+		endpoint:       netip.AddrPortFrom(listen.Listen.Build(netip.IPv4Unspecified()), listen.ListenPort),
+		masterPassword: masterPassword,
 	}, nil
 }
 
@@ -158,6 +163,9 @@ func (r autoConfigResponse) inboundOptions(nodeType string,
 	}
 	if protocol == C.TypeShadowsocks {
 		options, err := r.shadowsocksOptions(listen, auto.ShadowsocksObfsMu)
+		if err == nil {
+			options.ShadowsocksBanIP = auto.ShadowsocksBanIP
+		}
 		return protocol, options, err
 	}
 	tlsProtocol := normalizedProtocol(nodeType)
@@ -187,7 +195,7 @@ func (r autoConfigResponse) inboundOptions(nodeType string,
 	case C.TypeVMess:
 		return protocol, &option.VMessInboundOptions{
 			ListenOptions: listen, InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: tlsOptions},
-			Transport: transport,
+			Transport: transport, ShadowsocksBanIP: auto.ShadowsocksBanIP,
 		}, nil
 	case C.TypeVLESS:
 		return protocol, &option.VLESSInboundOptions{

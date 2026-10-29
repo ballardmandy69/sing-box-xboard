@@ -1,10 +1,12 @@
 package xboard
 
 import (
+	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"net/url"
 	"strings"
 
 	C "github.com/sagernet/sing-box/constant"
@@ -35,73 +37,86 @@ func normalizedProtocol(value string) string {
 
 func (r autoConfigResponse) transportOptions(protocol string) (*option.V2RayTransportOptions, error) {
 	network := strings.ToLower(strings.TrimSpace(r.Network))
+	if network == "" || network == "tcp" {
+		return nil, nil
+	}
 	var fields map[string]json.RawMessage
 	if !emptyPanelValue(r.NetworkSettings) {
 		if err := json.Unmarshal(r.NetworkSettings, &fields); err != nil {
 			return nil, fmt.Errorf("xboard networkSettings must be an object")
 		}
 	}
-	if network == "" || network == "tcp" {
-		if len(fields) > 0 {
-			return nil, fmt.Errorf("automatic raw TCP inbounds do not support networkSettings")
-		}
-		return nil, nil
-	}
 	if protocol != C.TypeVMess && protocol != C.TypeVLESS && protocol != C.TypeTrojan {
 		return nil, fmt.Errorf("this automatic xboard inbound requires raw TCP")
 	}
-	var settings panelTransportSettings
-	if len(fields) > 0 {
-		if err := json.Unmarshal(r.NetworkSettings, &settings); err != nil {
-			return nil, fmt.Errorf("invalid xboard TCP transport settings")
+	// UniProxy decodes neko but never passes it to the original shared transport builder.
+	if r.providerNormalized {
+		neko, err := panelTransportString(fields, "neko")
+		if err != nil {
+			return nil, err
 		}
-	}
-	if settings.Neko != "" {
-		return nil, fmt.Errorf("automatic xboard transport does not yet support neko settings")
-	}
-	headers := make(badoption.HTTPHeader, len(settings.Headers))
-	for name, raw := range settings.Headers {
-		var values []string
-		var value string
-		if json.Unmarshal(raw, &value) == nil {
-			values = []string{value}
-		} else if json.Unmarshal(raw, &values) != nil {
-			return nil, fmt.Errorf("xboard transport header must be a string or array of strings")
+		if neko != "" {
+			return nil, fmt.Errorf("automatic xboard transport does not yet support neko settings")
 		}
-		headers[name] = values
 	}
 	switch network {
-	case "ws":
+	case "ws", "websocket":
+		// The sample strips a non-empty ed query but fixes the early-data default at 2048.
+		path, err := panelTransportString(fields, "path")
+		if err != nil {
+			return nil, err
+		}
+		if parsed, err := url.Parse(path); err == nil {
+			query := parsed.Query()
+			if query.Get("ed") != "" {
+				query.Del("ed")
+				parsed.RawQuery = query.Encode()
+				path = parsed.String()
+			}
+		}
 		return &option.V2RayTransportOptions{
 			Type: C.V2RayTransportTypeWebsocket,
 			WebsocketOptions: option.V2RayWebsocketOptions{
-				Path: settings.Path, Headers: headers,
+				Path: path, Headers: make(badoption.HTTPHeader),
+				MaxEarlyData: 2048, EarlyDataHeaderName: "Sec-WebSocket-Protocol",
 			},
 		}, nil
-	case "httpupgrade":
-		host := settings.Host
-		if host == "" {
-			for name, values := range headers {
-				if http.CanonicalHeaderKey(name) == "Host" && len(values) > 0 {
-					host = values[0]
-					break
-				}
-			}
+	case "httpupgrade", "http-upgrade", "http_upgrade":
+		// Panel Host/headers are not forwarded by the original shared transport builder.
+		path, err := panelTransportString(fields, "path")
+		if err != nil {
+			return nil, err
 		}
 		return &option.V2RayTransportOptions{
 			Type: C.V2RayTransportTypeHTTPUpgrade,
 			HTTPUpgradeOptions: option.V2RayHTTPUpgradeOptions{
-				Path: settings.Path, Host: host, Headers: headers,
+				Path: path, Headers: make(badoption.HTTPHeader),
 			},
 		}, nil
 	case "grpc":
+		serviceName, err := panelTransportString(fields, "serviceName")
+		if err != nil {
+			return nil, err
+		}
 		return &option.V2RayTransportOptions{
 			Type:        C.V2RayTransportTypeGRPC,
-			GRPCOptions: option.V2RayGRPCOptions{ServiceName: settings.ServiceName},
+			GRPCOptions: option.V2RayGRPCOptions{ServiceName: serviceName},
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported automatic xboard TCP transport")
 	}
+}
+
+func panelTransportString(fields map[string]json.RawMessage, key string) (string, error) {
+	field := fields[key]
+	if len(field) == 0 {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(field, &value); err != nil {
+		return "", fmt.Errorf("invalid xboard TCP transport settings")
+	}
+	return value, nil
 }
 
 func (r autoConfigResponse) shadowsocksOptions(listen option.ListenOptions, obfsMu string) (*option.ShadowsocksInboundOptions, error) {
@@ -184,6 +199,13 @@ func (c autoInboundConfig) panelCredentials(uuids, passwords []string) ([]string
 	credentials, err := panelProtocolCredentials(c.protocol, uuids, passwords)
 	if err != nil {
 		return nil, err
+	}
+	if c.masterPassword != "" && (c.protocol == C.TypeTrojan || c.protocol == C.TypeAnyTLS) {
+		// Legacy callbacks derive from the original UUID without replacing the panel identity or UUID cache.
+		for index, uuid := range uuids {
+			digest := md5.Sum([]byte(uuid + c.masterPassword))
+			credentials[index] = hex.EncodeToString(digest[:])
+		}
 	}
 	if c.protocol != C.TypeShadowsocks {
 		return credentials, nil
