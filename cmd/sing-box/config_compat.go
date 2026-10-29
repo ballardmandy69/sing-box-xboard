@@ -163,6 +163,9 @@ func normalizeLegacyServerConfig(value any) any {
 	if duration, exists := root["HotUserCacheSec"]; exists {
 		nyafw["hot_user_cache_sec"] = duration
 	}
+	if guard, exists := root["MemoryGuard"]; exists {
+		nyafw["memory_guard"] = normalizeLegacyMemoryGuard(guard)
+	}
 	if mode, exists := root["AccessLog"]; exists {
 		nyafw["access_log"] = mode
 	} else if disabled, _ := root["DisableAccessLog"].(bool); disabled {
@@ -193,6 +196,45 @@ func normalizeLegacyServerConfig(value any) any {
 		delete(root, key)
 	}
 	return root
+}
+
+// normalizeLegacyMemoryGuard preserves invalid values for the typed decoder to reject.
+// @author lyt
+// @date 2026-10-29
+func normalizeLegacyMemoryGuard(value any) any {
+	converted, ok := renameLegacyFields(value, map[string]string{
+		"Enabled": "enabled", "CheckInterval": "check_interval", "BlockDuration": "block_duration", "Steps": "steps",
+	}).(map[string]any)
+	if !ok {
+		return value
+	}
+	if steps, ok := converted["steps"].([]any); ok {
+		result := make([]any, len(steps))
+		for index, step := range steps {
+			result[index] = renameLegacyFields(step, map[string]string{
+				"AvailableMemoryPercent": "available_memory_percent",
+				"BlockPercentPerCheck":   "block_percent_per_check", "MaxBlockedPercent": "max_blocked_percent",
+			})
+		}
+		converted["steps"] = result
+	}
+	return converted
+}
+
+func renameLegacyFields(value any, names map[string]string) any {
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	converted := make(map[string]any, len(fields))
+	for key, item := range fields {
+		field, known := names[key]
+		if !known {
+			field = key
+		}
+		converted[field] = item
+	}
+	return converted
 }
 
 // validateLegacyNodes rejects malformed node declarations before conversion can discard their values.

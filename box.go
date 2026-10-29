@@ -19,6 +19,7 @@ import (
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
+	"github.com/sagernet/sing-box/common/usercontrol"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/experimental"
@@ -246,6 +247,9 @@ func New(options Options) (*Box, error) {
 	httpClientService := adapter.LifecycleService(httpClientManager)
 	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions)
 	service.MustRegister[adapter.Router](ctx, router)
+	if cleaner := service.PtrFromContext[usercontrol.ConnectionCleaner](ctx); cleaner != nil {
+		router.AppendTracker(cleaner)
+	}
 	err = router.Initialize(routeOptions.Rules, routeOptions.RuleSet)
 	if err != nil {
 		return nil, E.Cause(err, "initialize router")

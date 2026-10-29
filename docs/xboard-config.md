@@ -159,11 +159,29 @@ Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新�
 - TCP VMess、VLESS、Shadowsocks 和 SS2022 的自动面板节点；支持的 WS、HTTPUpgrade、gRPC 组合有真实客户端测试。
 - UniProxy `MultiApiConfig` 聚合、全局与用户限速、IP/连接数/请求配额、ReportAlive。
 - 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
+- MemoryGuard 按系统可用内存关闭选中来源 IP 的连接，并按配置时长拒绝其新 TCP 连接。
 - 旧 DNS/FakeIP、GeoIP/Geosite、ip_on_demand、旧入站嗅探与域名策略。
 - `ShadowsocksObfsMu` HTTP 前导机制。它不等于 WebSocket：101 后直接传输 SS 密文，没有 WS 帧。
 
 当前源码的 `check` 不访问面板；运行后先同步用户、再同步节点配置，成功后才开放监听。
 首次同步失败会退避重试。安装烟测覆盖配置离线检查与真实节点进程启动两部分。
+
+开发分支可在 `server.yml` 根级配置内存保护；省略时不启用：
+
+```yaml
+MemoryGuard:
+  Enabled: true
+  CheckInterval: 5s
+  BlockDuration: 60s
+  Steps:
+    - AvailableMemoryPercent: 10
+      BlockPercentPerCheck: 2
+      MaxBlockedPercent: 10
+```
+
+这里统计 Linux `/proc/meminfo` 的系统内存，不是进程堆或容器的内存配额。
+比例按同一次内存压力事件首次出现连接时的来源 IP 数计算；连接关闭后基数保持不变。
+内存恢复只重置压力事件，尚未到期的 IP 封禁继续有效。
 
 所有代理 UDP 协议和 UDP 转发均排除，内部 DNS 保留配置语义。
 仍有其他面板、私有扩展组合、规则和资源管理功能未完成；详细进度及证据限制见

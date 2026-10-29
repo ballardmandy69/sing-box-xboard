@@ -8,6 +8,7 @@ on:
       - 'third_party/sing-vmess/**'
       - 'third_party/sing-shadowsocks/**'
       - 'common/usercontrol/**'
+      - 'common/memoryguard/**'
       - 'experimental/libbox/internal/oomprofile/**'
       - 'protocol/vmess/**'
       - 'protocol/vless/**'
@@ -54,6 +55,7 @@ on:
       - 'third_party/sing-vmess/**'
       - 'third_party/sing-shadowsocks/**'
       - 'common/usercontrol/**'
+      - 'common/memoryguard/**'
       - 'experimental/libbox/internal/oomprofile/**'
       - 'protocol/vmess/**'
       - 'protocol/vless/**'
@@ -123,11 +125,11 @@ jobs:
       - name: Restored routing, DNS, accounting and TCP protocol behavior
         run: >-
           go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/...
-          ./dns/... ./common/usercontrol ./service/ssmapi . -count=1 -timeout=180s
+          ./dns/... ./common/usercontrol ./common/memoryguard ./service/ssmapi . -count=1 -timeout=180s
       - name: Restored runtime races
         run: >-
           go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/...
-          ./dns/... ./common/usercontrol ./service/ssmapi . -count=1 -timeout=180s
+          ./dns/... ./common/usercontrol ./common/memoryguard ./service/ssmapi . -count=1 -timeout=180s
       - name: OOM profile generation with default Go link checks
         run: go test ./experimental/libbox/internal/oomprofile ./experimental/libbox ./experimental/boxdd -count=1 -timeout=90s
       - name: VMess credential generations and hot authentication

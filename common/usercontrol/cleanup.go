@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 const DefaultConnectionCleanupInterval = 120 * time.Second
 
 // ConnectionCleaner closes streams whose byte counter is unchanged across two periodic snapshots.
-// One instance may be shared by all managed nodes in a Box; it does not expire user limit state.
+// One instance is shared by accepted TCP sockets and managed streams in a Box.
+// Nested registrations share an underlying closer key and retain the most recent outer wrapper.
 // @author lyt
 // @date 2026-10-29
 type ConnectionCleaner struct {
@@ -101,6 +103,14 @@ func (c *ConnectionCleaner) Close() error {
 
 // TrackConnection deduplicates nested wrappers by their underlying closer, retaining the outer one.
 func (c *ConnectionCleaner) TrackConnection(conn net.Conn) net.Conn {
+	var source string
+	if remote := conn.RemoteAddr(); remote != nil {
+		source = M.SocksaddrFromNet(remote).Unwrap().Addr.String()
+	}
+	return c.trackConnection(conn, source)
+}
+
+func (c *ConnectionCleaner) trackConnection(conn net.Conn, source string) net.Conn {
 	tracked := &cleanupConn{Conn: conn, cleaner: c}
 	key := connectionKey(conn)
 	if !reflect.TypeOf(key).Comparable() {
@@ -108,8 +118,15 @@ func (c *ConnectionCleaner) TrackConnection(conn net.Conn) net.Conn {
 		key = tracked
 	}
 	tracked.key = key
+	tracked.source = source
 	c.access.Lock()
 	if !c.closed {
+		// The original registry replaces the closer/counter while retaining source metadata.
+		if previous := c.entries[key]; previous != nil {
+			tracked.source = previous.source
+			tracked.kind = previous.kind
+			tracked.userLabel = previous.userLabel
+		}
 		c.entries[key] = tracked
 	}
 	c.access.Unlock()
@@ -197,6 +214,9 @@ type cleanupConn struct {
 	net.Conn
 	cleaner   *ConnectionCleaner
 	key       io.Closer
+	source    string
+	kind      string
+	userLabel string
 	activity  atomic.Int64
 	closeOnce sync.Once
 	closeErr  error

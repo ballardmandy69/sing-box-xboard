@@ -26,8 +26,8 @@ jobs:
         run: go test -race ./... -count=1 -timeout=180s
       - name: Restored TCP protocol and runtime behavior
         run: |
-          go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... ./common/usercontrol ./service/ssmapi . -count=1 -timeout=180s
-          go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... ./common/usercontrol ./service/ssmapi . -count=1 -timeout=180s
+          go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... ./common/usercontrol ./common/memoryguard ./service/ssmapi . -count=1 -timeout=180s
+          go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... ./common/usercontrol ./common/memoryguard ./service/ssmapi . -count=1 -timeout=180s
       - name: VMess authentication races
         working-directory: third_party/sing-vmess
         run: go test -race ./... -count=1 -timeout=180s

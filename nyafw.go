@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/memoryguard"
 	"github.com/sagernet/sing-box/common/usercontrol"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -18,6 +19,7 @@ import (
 // @date 2026-10-29
 type nyafwRuntime struct {
 	cleaner *usercontrol.ConnectionCleaner
+	guard   *memoryguard.Guard
 }
 
 func newNYAFWRuntime(ctx context.Context, logger log.ContextLogger, options option.NYAFWOptions) (*nyafwRuntime, error) {
@@ -33,9 +35,28 @@ func newNYAFWRuntime(ctx context.Context, logger log.ContextLogger, options opti
 		return nil, err
 	}
 	cleaner.SetLogger(logger)
+	guardOptions := memoryguard.Options{
+		Enabled:       options.MemoryGuard.Enabled,
+		CheckInterval: time.Duration(options.MemoryGuard.CheckInterval),
+		BlockDuration: time.Duration(options.MemoryGuard.BlockDuration),
+	}
+	for _, step := range options.MemoryGuard.Steps {
+		guardOptions.Steps = append(guardOptions.Steps, memoryguard.Step{
+			AvailableMemoryPercent: step.AvailableMemoryPercent,
+			BlockPercentPerCheck:   step.BlockPercentPerCheck,
+			MaxBlockedPercent:      step.MaxBlockedPercent,
+		})
+	}
+	guard, err := memoryguard.New(guardOptions, cleaner, logger)
+	if err != nil {
+		return nil, err
+	}
 	service.MustRegisterPtr(ctx, cleaner)
+	if guard != nil {
+		service.MustRegisterPtr(ctx, guard)
+	}
 	service.MustRegisterPtr(ctx, &options)
-	return &nyafwRuntime{cleaner: cleaner}, nil
+	return &nyafwRuntime{cleaner: cleaner, guard: guard}, nil
 }
 
 func (r *nyafwRuntime) Name() string {
@@ -50,5 +71,11 @@ func (r *nyafwRuntime) Start(stage adapter.StartStage, scope *adapter.Scope) err
 		return err
 	}
 	scope.Add(r.cleaner.Close)
+	if r.guard != nil {
+		if err := r.guard.Start(); err != nil {
+			return err
+		}
+		scope.Add(r.guard.Close)
+	}
 	return nil
 }
