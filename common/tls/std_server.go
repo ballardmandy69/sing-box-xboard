@@ -518,6 +518,11 @@ func NewSTDServer(ctx context.Context, logger log.ContextLogger, options option.
 		defer serverConfig.access.RUnlock()
 		return serverConfig.config, nil
 	}
+	if certificateProvider == nil && acmeService == nil && len(tlsConfig.Certificates) > 0 {
+		if err := applySNIPolicy(tlsConfig, options.SNIRegex); err != nil {
+			return nil, err
+		}
+	}
 	var config ServerConfig = serverConfig
 	if options.KernelTx || options.KernelRx {
 		if !C.IsLinux {

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -63,6 +64,9 @@ func (r *TransportRegistry) CreateOptions(transportType string) (any, bool) {
 }
 
 func (r *TransportRegistry) CreateDNSTransport(ctx context.Context, logger log.ContextLogger, tag string, transportType string, options any) (adapter.DNSTransport, error) {
+	if transportType == "" || transportType == C.DNSTypeLegacy {
+		return r.createLegacyTransport(ctx, logger, tag, options)
+	}
 	r.access.Lock()
 	defer r.access.Unlock()
 	constructor, loaded := r.constructors[transportType]

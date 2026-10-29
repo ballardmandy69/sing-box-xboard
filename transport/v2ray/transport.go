@@ -31,10 +31,7 @@ func NewServerTransport(ctx context.Context, logger logger.ContextLogger, option
 	case C.V2RayTransportTypeWebsocket:
 		return v2raywebsocket.NewServer(ctx, logger, options.WebsocketOptions, tlsConfig, handler)
 	case C.V2RayTransportTypeQUIC:
-		if tlsConfig == nil {
-			return nil, C.ErrTLSRequired
-		}
-		return NewQUICServer(ctx, logger, options.QUICOptions, tlsConfig, handler)
+		return nil, C.ErrUDPDisabled
 	case C.V2RayTransportTypeGRPC:
 		return NewGRPCServer(ctx, logger, options.GRPCOptions, tlsConfig, handler)
 	case C.V2RayTransportTypeHTTPUpgrade:
@@ -56,10 +53,7 @@ func NewClientTransport(ctx context.Context, dialer N.Dialer, serverAddr M.Socks
 	case C.V2RayTransportTypeWebsocket:
 		return v2raywebsocket.NewClient(ctx, dialer, serverAddr, options.WebsocketOptions, tlsConfig)
 	case C.V2RayTransportTypeQUIC:
-		if tlsConfig == nil {
-			return nil, C.ErrTLSRequired
-		}
-		return NewQUICClient(ctx, dialer, serverAddr, options.QUICOptions, tlsConfig)
+		return nil, C.ErrUDPDisabled
 	case C.V2RayTransportTypeHTTPUpgrade:
 		return v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
 	default:

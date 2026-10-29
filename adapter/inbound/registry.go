@@ -69,6 +69,7 @@ func (m *Registry) Create(ctx context.Context, router adapter.Router, logger log
 	if !loaded {
 		return nil, E.New("outbound type not found: " + outboundType)
 	}
+	router = withLegacyInboundOptions(router, options)
 	return constructor(ctx, router, logger, tag, options)
 }
 

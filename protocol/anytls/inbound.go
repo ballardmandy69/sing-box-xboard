@@ -16,6 +16,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/trojan"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -52,6 +53,7 @@ type Inbound struct {
 	logger      logger.ContextLogger
 	listener    *listener.Listener
 	service     *anytls.Service
+	composite   *compositeService
 	tracker     atomic.Pointer[trackerState]
 	access      sync.Mutex
 	credentials map[string][32]byte
@@ -68,6 +70,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		logger:      logger,
 		connections: make(map[net.Conn]*connectionState),
 	}
+	composite, err := newCompositeService(inbound, options)
+	if err != nil {
+		return nil, err
+	}
+	inbound.composite = composite
 
 	if options.TLS != nil && options.TLS.Enabled {
 		tlsConfig, err := tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
@@ -128,6 +135,11 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx, cancel := context.WithCancel(ctx)
 	raw := conn
+	var lifetime *compositeLifetimeConn
+	if h.composite != nil {
+		lifetime = &compositeLifetimeConn{Conn: conn, closed: make(chan struct{})}
+		conn = lifetime
+	}
 	state := &connectionState{connection: raw, cancel: cancel}
 	h.access.Lock()
 	if h.closed {
@@ -156,24 +168,44 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 	}
 	h.access.Lock()
 	revision := h.revision
+	var users *compositeUsers
+	if h.composite != nil {
+		users = h.composite.users
+	}
 	h.access.Unlock()
-	err := h.service.NewConnectionWithAuth(adapter.WithContext(ctx, &metadata), conn,
-		metadata.Source, onClose, func(userContext context.Context) error {
-			user, found := auth.UserFromContext[string](userContext)
-			h.access.Lock()
-			defer h.access.Unlock()
-			if !found || h.closed || revision != h.revision || ctx.Err() != nil {
-				return E.New("anytls user changed during authentication")
+	onAuthenticated := func(userContext context.Context) error {
+		user, found := auth.UserFromContext[string](userContext)
+		h.access.Lock()
+		defer h.access.Unlock()
+		if !found || h.closed || revision != h.revision || ctx.Err() != nil {
+			return E.New("anytls user changed during authentication")
+		}
+		if h.managed {
+			if _, exists := h.credentials[user]; !exists {
+				return E.New("anytls managed user no longer exists")
 			}
-			if h.managed {
-				if _, exists := h.credentials[user]; !exists {
-					return E.New("anytls managed user no longer exists")
-				}
+		}
+		state.user = user
+		state.authenticated = true
+		return nil
+	}
+	var err error
+	if h.composite == nil {
+		err = h.service.NewConnectionWithAuth(adapter.WithContext(ctx, &metadata), conn,
+			metadata.Source, onClose, onAuthenticated)
+	} else {
+		var protocol string
+		protocol, err = h.composite.newConnection(adapter.WithContext(ctx, &metadata), conn,
+			metadata.Source, onClose, users, h.service, onAuthenticated)
+		if err == nil && protocol != C.TypeAnyTLS {
+			// TCP routers may take ownership asynchronously. Only physical Close ends
+			// the managed session; closing a single multiplexed stream must not do so.
+			select {
+			case <-lifetime.closed:
+			case <-ctx.Done():
 			}
-			state.user = user
-			state.authenticated = true
-			return nil
-		})
+		}
+	}
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
@@ -212,7 +244,13 @@ func (h *Inbound) UpdateUsers(names, passwords []string) error {
 		h.access.Unlock()
 		return net.ErrClosed
 	}
-	h.service.UpdateUsers(users)
+	if h.composite != nil {
+		h.composite.updateUsers(common.Map(users, func(user anytls.User) option.AnyTLSUser {
+			return option.AnyTLSUser(user)
+		}))
+	} else {
+		h.service.UpdateUsers(users)
+	}
 	h.revision++
 	for _, state := range h.connections {
 		if !state.authenticated {
@@ -261,6 +299,16 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	if protocol, loaded := ctx.Value(compositeProtocolKey{}).(string); loaded {
+		metadata.InboundType = protocol
+		if protocol == C.TypeTrojan && h.composite.forceMux {
+			if err := trojan.CheckForceMux(source, destination); err != nil {
+				h.logger.DebugContext(ctx, "reject non-multiplex IPv4 composite Trojan connection")
+				N.CloseOnHandshakeFailure(conn, onClose, err)
+				return
+			}
+		}
+	}
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
@@ -273,7 +321,12 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}
 	if state := h.tracker.Load(); state != nil && state.tracker != nil {
-		conn = state.tracker.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, state.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)

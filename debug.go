@@ -31,6 +31,6 @@ func applyDebugOptions(options option.DebugOptions) {
 		debug.SetTraceback(options.TraceBack)
 	}
 	if options.MemoryLimit.Value() != 0 {
-		debug.SetMemoryLimit(int64(float64(options.MemoryLimit.Value()) / 1.5))
+		debug.SetMemoryLimit(int64(options.MemoryLimit.Value()))
 	}
 }

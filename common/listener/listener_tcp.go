@@ -77,6 +77,8 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Original admission and registration precede PROXY header injection.
+	tcpListener = wrapMaintenanceListener(l.ctx, tcpListener)
 	if l.listenOptions.ProxyProtocol || l.listenOptions.ProxyProtocolAcceptNoHeader {
 		tcpListener = newProxyProtocolListener(
 			tcpListener, l.listenOptions.ProxyProtocolAcceptNoHeader, proxyProtocolHeaderTimeout,
@@ -132,6 +134,8 @@ func (c *proxyProtocolConn) Read(data []byte) (int, error) {
 func (c *proxyProtocolConn) RemoteAddr() net.Addr {
 	return c.source
 }
+
+func (c *proxyProtocolConn) Upstream() any { return c.Conn }
 
 func newProxyProtocolListener(
 	listener net.Listener, acceptNoHeader bool, timeout time.Duration,

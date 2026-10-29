@@ -15,10 +15,12 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/httpclient"
 	"github.com/sagernet/sing-box/common/netns"
+	"github.com/sagernet/sing-box/common/nodepolicy"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
+	"github.com/sagernet/sing-box/common/usercontrol"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/experimental"
@@ -108,6 +110,9 @@ func Context(
 }
 
 func New(options Options) (*Box, error) {
+	if err := validateTCPOnlyProxies(options.Options); err != nil {
+		return nil, err
+	}
 	createdAt := time.Now()
 	ctx := options.Context
 	if ctx == nil {
@@ -185,6 +190,19 @@ func New(options Options) (*Box, error) {
 	service.MustRegister[log.Factory](ctx, logFactory)
 
 	var internalServices []adapter.LifecycleService
+	if options.NYAFW != nil {
+		runtime, runtimeErr := newNYAFWRuntime(ctx, logFactory.NewLogger("nyafw"), *options.NYAFW)
+		if runtimeErr != nil {
+			return nil, runtimeErr
+		}
+		internalServices = append(internalServices, runtime)
+	}
+	policies, err := nodepolicy.NewRegistry(common.PtrValueOrDefault(options.NYAFW).BlockScanner,
+		service.PtrFromContext[usercontrol.ConnectionCleaner](ctx))
+	if err != nil {
+		return nil, E.Cause(err, "initialize node policies")
+	}
+	service.MustRegister[adapter.ManagedNodePolicy](ctx, policies)
 	routeOptions := common.PtrValueOrDefault(options.Route)
 	certificateOptions := common.PtrValueOrDefault(options.Certificate)
 	if C.IsAndroid || certificateOptions.Store != "" && certificateOptions.Store != C.CertificateStoreSystem ||
@@ -236,6 +254,9 @@ func New(options Options) (*Box, error) {
 	httpClientService := adapter.LifecycleService(httpClientManager)
 	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions)
 	service.MustRegister[adapter.Router](ctx, router)
+	if cleaner := service.PtrFromContext[usercontrol.ConnectionCleaner](ctx); cleaner != nil {
+		router.AppendTracker(cleaner)
+	}
 	err = router.Initialize(routeOptions.Rules, routeOptions.RuleSet)
 	if err != nil {
 		return nil, E.Cause(err, "initialize router")
@@ -315,6 +336,9 @@ func New(options Options) (*Box, error) {
 			tag = inboundOptions.Tag
 		} else {
 			tag = F.ToString(i)
+		}
+		if inboundOptions.UsePanelTag != "" {
+			policies.SetPanelTag(tag, inboundOptions.UsePanelTag)
 		}
 		err = inboundManager.Create(
 			ctx,
@@ -543,7 +567,7 @@ func (s *Box) preStart() error {
 	}
 	s.scope.Add(s.logFactory.Close)
 	applyDebugOptions(s.debugOptions)
-	debugHTTPServer, err := startDebugHTTPServer(s.debugOptions)
+	debugHTTPServer, err := startDebugHTTPServer(s.scope.Context(), s.debugOptions)
 	if err != nil {
 		return err
 	}

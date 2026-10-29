@@ -2,7 +2,8 @@ package option
 
 type VMessInboundOptions struct {
 	ListenOptions
-	Users []VMessUser `json:"users,omitempty"`
+	Users            []VMessUser `json:"users,omitempty"`
+	ShadowsocksBanIP bool        `json:"shadowsocks_ban_ip,omitempty"`
 	InboundTLSOptionsContainer
 	Multiplex *InboundMultiplexOptions `json:"multiplex,omitempty"`
 	Transport *V2RayTransportOptions   `json:"transport,omitempty"`

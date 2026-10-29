@@ -1,6 +1,7 @@
 package sniff
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -10,10 +11,17 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/service"
 )
 
 func TLSClientHello(ctx context.Context, metadata *adapter.InboundContext, reader io.Reader) error {
 	var clientHello *tls.ClientHelloInfo
+	var captured bytes.Buffer
+	policy := service.FromContext[adapter.ManagedNodePolicy](ctx)
+	fingerprintEnabled := policy != nil && policy.FingerprintEnabled()
+	if fingerprintEnabled {
+		reader = io.TeeReader(reader, &captured)
+	}
 	err := tls.Server(bufio.NewReadOnlyConn(reader), &tls.Config{
 		GetConfigForClient: func(argHello *tls.ClientHelloInfo) (*tls.Config, error) {
 			clientHello = argHello
@@ -23,6 +31,9 @@ func TLSClientHello(ctx context.Context, metadata *adapter.InboundContext, reade
 	if clientHello != nil {
 		metadata.Protocol = C.ProtocolTLS
 		metadata.Domain = clientHello.ServerName
+		if fingerprintEnabled {
+			metadata.TLSFingerprint = legacyJA3Fingerprint(captured.Bytes())
+		}
 		return nil
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) {

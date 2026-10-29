@@ -13,7 +13,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 }
 TMP_DIR="$(mktemp -d)"
 panel_pid=''
+core_pid=''
 cleanup() {
+  if [ -n "$core_pid" ]; then
+    kill "$core_pid" 2>/dev/null || true
+    wait "$core_pid" 2>/dev/null || true
+  fi
   if [ -n "$panel_pid" ]; then
     kill "$panel_pid" 2>/dev/null || true
     wait "$panel_pid" 2>/dev/null || true
@@ -86,9 +91,30 @@ bash "$ROOT/release/package-xboard.sh" "$SING_BOX_BINARY" amd64 "$TMP_DIR/releas
 cp "$TMP_DIR/release/SHA256SUMS-amd64.txt" "$TMP_DIR/release/SHA256SUMS.txt"
 tar -xzf "$TMP_DIR/release/sing-box-xboard-amd64.tar.gz" -C "$TMP_DIR/package"
 
+command -v openssl >/dev/null 2>&1 || fail "openssl is required for real TLS configuration tests"
 run_installer || { cat "$TMP_DIR/install.log" >&2; fail "fresh install"; }
 [ -x "$TMP_DIR/install/sing-box" ] || fail "missing installed core"
-[ ! -e "$TMP_DIR/install/server-public-key.txt" ] || fail "installer generated an unsolicited key pair"
+[ ! -e "$TMP_DIR/install/server-public-key.txt" ] || fail "installer generated an unsolicited native key pair"
+for name in zq.key zq.crt zq.pem; do
+  [ -s "$TMP_DIR/install/$name" ] || fail "missing initial TLS file $name"
+  [ "$(stat -c %a "$TMP_DIR/install/$name")" = 600 ] || fail "TLS file permissions: $name"
+done
+openssl pkey -in "$TMP_DIR/install/zq.key" -pubout > "$TMP_DIR/default-key.pub"
+openssl x509 -in "$TMP_DIR/install/zq.crt" -pubkey -noout > "$TMP_DIR/default-cert.pub"
+cmp "$TMP_DIR/default-key.pub" "$TMP_DIR/default-cert.pub" || fail "initial TLS key and certificate differ"
+openssl pkey -in "$TMP_DIR/install/zq.key" -text -noout > "$TMP_DIR/default-key-info"
+grep -q 'prime256v1' "$TMP_DIR/default-key-info" || fail "initial TLS key is not P-256"
+[ "$(openssl x509 -in "$TMP_DIR/install/zq.crt" -subject -noout -nameopt RFC2253)" = 'subject=' ] ||
+  fail "initial TLS certificate subject differs from the sample"
+openssl x509 -in "$TMP_DIR/install/zq.crt" -checkend 31449600 -noout > /dev/null ||
+  fail "initial TLS validity is shorter than 364 days"
+if openssl x509 -in "$TMP_DIR/install/zq.crt" -checkend 31622400 -noout > /dev/null; then
+  fail "initial TLS validity exceeds 366 days"
+fi
+cat "$TMP_DIR/install/zq.crt" "$TMP_DIR/install/zq.key" > "$TMP_DIR/default-bundle.pem"
+cmp "$TMP_DIR/default-bundle.pem" "$TMP_DIR/install/zq.pem" || fail "TLS bundle order differs"
+sha256sum "$TMP_DIR/install/zq.key" "$TMP_DIR/install/zq.crt" "$TMP_DIR/install/zq.pem" \
+  > "$TMP_DIR/default-certificate-before.sha256"
 cmp "$ROOT/config.xboard.json" "$TMP_DIR/install/config.json" || fail "generic JSON template changed"
 cmp "$ROOT/server.xboard.yml" "$TMP_DIR/install/server.yml" || fail "generic YAML template changed"
 grep -Eq '"inbounds"[[:space:]]*:[[:space:]]*\[\]' "$TMP_DIR/install/config.json" || fail "unexpected default listener"
@@ -106,7 +132,7 @@ done
 grep -q '__SERVER_PRIVATE_KEY__' "$TMP_DIR/install/examples/config.anytls-native.json" ||
   fail "example contains generated private key"
 ! grep -Eq '^(enable|restart|start) ' "$SMOKE_LOG" || fail "installer started a service"
-pass 'fresh install uses empty Nodes and no listeners or keys, without starting services or contacting a panel'
+pass 'fresh install creates default P-256 TLS files with empty Nodes, without starting services or contacting a panel'
 
 printf 'log:\n  level: warn\n' > "$TMP_DIR/extra.yml"
 "$TMP_DIR/install/sing-box" check -c "$TMP_DIR/install/config.json" \
@@ -121,9 +147,59 @@ cp "$TMP_DIR/install/server.yml" "$TMP_DIR/original.yml"
 run_installer || { cat "$TMP_DIR/install.log" >&2; fail "upgrade"; }
 cmp "$TMP_DIR/original.json" "$TMP_DIR/install/config.json" || fail "upgrade changed config"
 cmp "$TMP_DIR/original.yml" "$TMP_DIR/install/server.yml" || fail "upgrade changed YAML"
+sha256sum -c "$TMP_DIR/default-certificate-before.sha256" > "$TMP_DIR/default-certificate-check.log" ||
+  fail "upgrade replaced the initial TLS identity"
 pass 'upgrade preserves generic configuration and operator edits'
 
-command -v openssl >/dev/null 2>&1 || fail "openssl is required for real TLS configuration tests"
+rm -f -- "$TMP_DIR/install/zq.pem"
+run_installer || { cat "$TMP_DIR/install.log" >&2; fail "missing TLS bundle repair"; }
+sha256sum -c "$TMP_DIR/default-certificate-before.sha256" > "$TMP_DIR/default-certificate-check.log" ||
+  fail "missing bundle repair changed the certificate or private key"
+pass 'missing TLS bundle is rebuilt from the existing unchanged certificate and key'
+
+mkdir "$TMP_DIR/partial-tls"
+cp "$TMP_DIR/install/zq.key" "$TMP_DIR/partial-tls/zq.key"
+expect_failure env INSTALL_DIR="$TMP_DIR/partial-tls" SYSTEMD_DIR="$TMP_DIR/partial-tls-units" \
+  ARCH=amd64 RELEASE_DIR="$TMP_DIR/release" bash "$ROOT/install.sh"
+cmp "$TMP_DIR/install/zq.key" "$TMP_DIR/partial-tls/zq.key" || fail "incomplete TLS identity was overwritten"
+[ ! -e "$TMP_DIR/partial-tls/sing-box" ] || fail "incomplete TLS files allowed partial installation"
+pass 'incomplete existing TLS pair is rejected without replacing its private key'
+
+mkdir "$TMP_DIR/invalid-tls-config"
+printf '{invalid-json}\n' > "$TMP_DIR/invalid-tls-config/config.json"
+cp "$ROOT/server.xboard.yml" "$TMP_DIR/invalid-tls-config/server.yml"
+expect_failure env INSTALL_DIR="$TMP_DIR/invalid-tls-config" SYSTEMD_DIR="$TMP_DIR/invalid-tls-units" \
+  ARCH=amd64 RELEASE_DIR="$TMP_DIR/release" bash "$ROOT/install.sh"
+for name in zq.key zq.crt zq.pem sing-box; do
+  [ ! -e "$TMP_DIR/invalid-tls-config/$name" ] || fail "failed check left generated file $name"
+done
+grep -Fxq '{invalid-json}' "$TMP_DIR/invalid-tls-config/config.json" || fail "failed check changed old JSON"
+cmp "$ROOT/server.xboard.yml" "$TMP_DIR/invalid-tls-config/server.yml" || fail "failed check changed old YAML"
+pass 'configuration validation failure removes newly generated TLS files and preserves original configuration'
+
+mkdir "$TMP_DIR/default-tls-static"
+default_tls_config="$(< "$ROOT/config.trojan.json")"
+default_tls_config="${default_tls_config//__TLS_CERT_FILE__/.\/zq.crt}"
+default_tls_config="${default_tls_config//__TLS_KEY_FILE__/.\/zq.key}"
+printf '%s\n' "$default_tls_config" > "$TMP_DIR/default-tls-static/config.json"
+unset default_tls_config
+cp "$ROOT/server.xboard.yml" "$TMP_DIR/default-tls-static/server.yml"
+env INSTALL_DIR="$TMP_DIR/default-tls-static" SYSTEMD_DIR="$TMP_DIR/default-tls-static-units" \
+  ARCH=amd64 RELEASE_DIR="$TMP_DIR/release" bash "$ROOT/install.sh" > "$TMP_DIR/default-tls-static.log" 2>&1 ||
+  { cat "$TMP_DIR/default-tls-static.log" >&2; fail "relative default TLS paths"; }
+(cd "$TMP_DIR/default-tls-static" && ./sing-box check -c config.json -s server.yml) ||
+  fail "generated default TLS files are unusable from the service working directory"
+pass 'existing static configuration resolves newly generated relative zq certificate paths during validation'
+
+mkdir "$TMP_DIR/fail-openssl"
+printf '#!/usr/bin/env bash\nexit 19\n' > "$TMP_DIR/fail-openssl/openssl"
+chmod 0755 "$TMP_DIR/fail-openssl/openssl"
+expect_failure env PATH="$TMP_DIR/fail-openssl:$PATH" INSTALL_DIR="$TMP_DIR/failed-certificate" \
+  SYSTEMD_DIR="$TMP_DIR/failed-certificate-units" ARCH=amd64 RELEASE_DIR="$TMP_DIR/release" \
+  bash "$ROOT/install.sh"
+[ ! -e "$TMP_DIR/failed-certificate" ] || fail "certificate generation failure changed the installation"
+pass 'certificate generation failure stops before changing the installation'
+
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   -keyout "$TMP_DIR/tls.key" -out "$TMP_DIR/tls.crt" -days 1 -subj /CN=localhost \
   > "$TMP_DIR/certificate.log" 2>&1
@@ -163,7 +239,7 @@ class Panel(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
-        if parsed.path != "/api/v1/server/UniProxy/config":
+        if parsed.path not in ("/api/v1/server/UniProxy/config", "/api/v1/server/UniProxy/user"):
             self.send_error(404)
             return
         if query.get("token") != ["installer-test-token"]:
@@ -171,7 +247,11 @@ class Panel(http.server.BaseHTTPRequestHandler):
             return
         node_id = int(query["node_id"][0])
         protocol = query["node_type"][0]
-        body = json.dumps({"protocol": protocol, "server_port": 24000 + node_id}).encode()
+        if parsed.path.endswith("/user"):
+            payload = {"users": [{"id": 1, "uuid": "00000000-0000-4000-8000-000000000001"}]}
+        else:
+            payload = {"protocol": protocol, "server_port": 24000 + node_id}
+        body = json.dumps(payload).encode()
         with open(sys.argv[1], "a", encoding="utf-8") as log:
             log.write(f"{node_id} {protocol}\n")
         self.send_response(200)
@@ -191,6 +271,7 @@ PYTHON
 coproc PANEL_PROCESS { exec python3 -u "$TMP_DIR/panel.py" "$TMP_DIR/panel-requests.log"; }
 panel_pid="$PANEL_PROCESS_PID"
 read -r -t 10 panel_port <&"${PANEL_PROCESS[0]}" || fail "local panel fixture did not start"
+touch "$TMP_DIR/panel-requests.log"
 key_pair="$("$SING_BOX_BINARY" generate anytls-native-keypair)"
 native_private_key="$(printf '%s\n' "$key_pair" | sed -n 's/^PrivateKey: //p')"
 unset key_pair
@@ -205,13 +286,18 @@ for combination in anytls trojan native anytls,trojan anytls,native trojan,nativ
   cp "$TMP_DIR/tls.key" "$combination_dir/tls.key"
   printf 'DisableAccessLog: false\nNodes:\n' > "$combination_dir/server.yml"
   IFS=, read -r -a protocols <<< "$combination"
+  listen_ports=()
   node_index=0
   for protocol in "${protocols[@]}"; do
     node_index=$((node_index + 1))
     node_type="$protocol"
     [ "$protocol" != native ] || node_type=anytls
+    listen_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    listen_ports+=("$listen_port")
     cat >> "$combination_dir/server.yml" <<YAML
   - Type: UniProxy
+    ListenIP: "127.0.0.1"
+    ListenPort: $listen_port
     ApiConfig:
       PanelTag: "$protocol-$node_index"
       ApiHost: "http://127.0.0.1:$panel_port"
@@ -237,6 +323,7 @@ YAML
   if [ -f "$combination_dir/native.key" ]; then
     (cd "$combination_dir" && sha256sum native.key >> before.sha256)
   fi
+  requests_before="$(wc -l < "$TMP_DIR/panel-requests.log")"
   env INSTALL_DIR="$combination_dir" SYSTEMD_DIR="$TMP_DIR/combination-units-$combination_index" \
     ARCH=amd64 INSTANCE=server RELEASE_DIR="$TMP_DIR/release" \
     bash "$ROOT/install.sh" > "$TMP_DIR/combination-$combination_index.log" 2>&1 || {
@@ -245,10 +332,41 @@ YAML
     }
   (cd "$combination_dir" && sha256sum -c before.sha256) > "$TMP_DIR/combination-hashes.log" ||
     fail "installation changed existing Nodes or key material for $combination"
+  [ "$(wc -l < "$TMP_DIR/panel-requests.log")" = "$requests_before" ] ||
+    fail "configuration checking contacted a panel before runtime startup"
+  (cd "$combination_dir" && exec ./sing-box run -c config.json -s server.yml) \
+    > "$TMP_DIR/combination-runtime-$combination_index.log" 2>&1 &
+  core_pid=$!
+  if ! python3 - "${listen_ports[@]}" <<'PYTHON'
+import socket
+import sys
+import time
+
+deadline = time.monotonic() + 8
+pending = {int(port) for port in sys.argv[1:]}
+while pending and time.monotonic() < deadline:
+    for port in list(pending):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                pending.remove(port)
+        except OSError:
+            pass
+    if pending:
+        time.sleep(0.02)
+if pending:
+    sys.exit("configured listeners did not start: " + str(sorted(pending)))
+PYTHON
+  then
+    cat "$TMP_DIR/combination-runtime-$combination_index.log" >&2
+    fail "runtime failed to activate Nodes for $combination"
+  fi
+  kill "$core_pid"
+  wait "$core_pid" || true
+  core_pid=''
 done
 unset native_private_key
 [ "$(wc -l < "$TMP_DIR/panel-requests.log")" -ge 16 ] || fail "node combinations did not query the local panel"
-pass 'all seven protocol combinations and repeated-protocol Nodes preserve configuration and key material'
+pass 'all protocol combinations preserve files, check offline, and activate real configured listeners at runtime'
 
 mkdir "$TMP_DIR/partial-config"
 cp "$TMP_DIR/install/config.json" "$TMP_DIR/partial-config/config.json"

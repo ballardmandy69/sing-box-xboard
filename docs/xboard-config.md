@@ -143,10 +143,101 @@ bash <(curl -fLSs https://raw.githubusercontent.com/ballardmandy69/sing-box-xboa
 
 下载后校验配置，保存为 `a.json` / `a.yml`，启动独立实例；失败恢复旧配置并尝试恢复原服务状态，恢复操作失败会明确提示。证书、私钥文件应提前存在，配置下载服务需保护其中的 API token。
 
-## 兼容边界
+## 已发布 v1.14.3-xboard-native.2 的兼容边界
 
 已对齐此处三种协议的节点布局、面板用户与流量同步、监听覆盖、证书、PROXY protocol 和 AutoOutIP；不是 nyafw 全功能复刻。自动节点暂限普通 TCP、标准 TLS，未实现 WebSocket、gRPC、Reality 或 `MultiApiConfig`。
 
 旧全局 `IPLimit`、`RateLimit`、`ConnectionLimit`、`HotUserCacheSec`、`ConnectionCleanupIntervalSec` 等兼容字段不会启用原后端对应限制；面板 `speed_limit`、`device_limit` 也尚未执行。不要将它们当作已经生效的限速或限设备保障。`DisableAccessLog: true` 目前会禁用整个日志输出，建议保留 false。`AcceptAnyTLS`、`ForceMux`、`TLSJson` 等原后端专有扩展未接入。
 
 Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新增并发多流 mux 或冷连接 0-RTT。不宣称私有协议无法被识别，也不保证解决公网 IP 的 TCP 阻断。
+
+## 完整复现开发分支
+
+`codex/nyafw-full-parity` 中的当前源码已进一步接入下列能力，尚未发布对应版本；
+上文固定版本的安装命令仍安装 v2，不能把开发分支选项当作 v2 已有功能。
+
+开发分支验证安装使用同一提交的脚本、配置和内核。以下为 Bash + Go 1.26.5，适用于 Linux amd64：
+
+```bash
+git clone --branch codex/nyafw-full-parity --single-branch https://github.com/ballardmandy69/sing-box-xboard.git
+cd sing-box-xboard
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o sing-box ./cmd/sing-box
+bash release/package-xboard.sh "$PWD/sing-box" amd64 "$PWD/artifacts"
+cp artifacts/SHA256SUMS-amd64.txt artifacts/SHA256SUMS.txt
+sudo env RELEASE_DIR="$PWD/artifacts" bash ./install.sh
+```
+
+这是开发验证包；保留空 Nodes，安装后按前面的 YAML 添加节点并手工启动对应实例。
+原版运行验收完成前，发布页上的正式版本仍维持现有阶段版本。
+
+开发分支安装器在 `zq.key`、`zq.crt`、`zq.pem` 均不存在时，使用 OpenSSL 生成与原脚本一致的
+P-256、365 天、空 subject 自签证书；合并文件顺序为证书后接私钥，三个文件权限均为 `0600`。
+已有证书和私钥保持不变，仅缺 `zq.pem` 时从原文件重建；不完整的密钥/证书组合会明确报错。
+配置检查或安装失败会移除本次新生成的文件。首次安装仍保留空 Nodes、不自动启动服务；
+Native 的独立密钥仍在添加该协议时生成。使用自签证书时，客户端需配置对应的证书信任。
+
+- TCP VMess、VLESS、Shadowsocks 和 SS2022 的自动面板节点；支持的 WS、HTTPUpgrade、gRPC 组合有真实客户端测试。
+- `MultiApiConfig` 聚合四种 provider、全局与用户限速、IP/连接数/请求配额、ReportAlive。
+- 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
+- MemoryGuard 按系统可用内存关闭选中来源 IP 的连接，并按配置时长拒绝其新 TCP 连接。
+- `experimental.debug.listen` 提供原版的内存、连接榜、pprof、GC 和热用户缓存查询接口。
+- OldV2Board、PPanel、SSPanel 使用各自请求格式；PPanel 与旧 SSPanel 的状态报告保留原样本固定值，不代表实时负载。
+- `BlockScanner` CEL 扫描规则和主面板正则规则已接入，拒绝原因写入 AccessLog。
+- 旧 DNS/FakeIP、GeoIP/Geosite、ip_on_demand、旧入站嗅探与域名策略。
+- `ShadowsocksObfsMu` HTTP 前导机制。它不等于 WebSocket：101 后直接传输 SS 密文，没有 WS 帧。
+- `AcceptAnyTLS`、`FallbackService` 同端口组合，Trojan `ForceMux` / `ServerPadding` 和全局 SingMux 分发。
+- `TLSJson` 原字段覆盖、静态证书 `SniPolicy`、默认嗅探和本地 `VLESS` 选择。
+- SSPanel 检测规则与违规批量上报，失败保留批次，在下次同步时重试。
+- `MasterPassword` 按原版方式为自动 Trojan/AnyTLS 派生凭据，组合 AnyTLS 入口统一生效。
+- `ShadowsocksBanIP` 为传统 SS 多用户和 VMess 入口提供共享来源 IP 的认证失败封禁。
+- `StaticInbound` 配合 JSON `use_panel_tag` 关联面板，保持静态认证表；Mux/detour 按最终逻辑流计费。
+
+当前源码的 `check` 不访问面板；运行后先同步用户、再同步节点配置，成功后才开放监听。
+首次同步失败会退避重试。安装烟测覆盖配置离线检查与真实节点进程启动两部分。
+
+开发分支可在 `server.yml` 根级配置内存保护；省略时不启用：
+
+```yaml
+MemoryGuard:
+  Enabled: true
+  CheckInterval: 5s
+  BlockDuration: 60s
+  Steps:
+    - AvailableMemoryPercent: 10
+      BlockPercentPerCheck: 2
+      MaxBlockedPercent: 10
+```
+
+这里统计 Linux `/proc/meminfo` 的系统内存，不是进程堆或容器的内存配额。
+比例按同一次内存压力事件首次出现连接时的来源 IP 数计算；连接关闭后基数保持不变。
+内存恢复只重置压力事件，尚未到期的 IP 封禁继续有效。
+
+开发分支可在 `config.json` 中设置 `"experimental": {"debug": {"listen": "127.0.0.1:9091"}}`。
+`/debug/memory` 查看内存，`/debug/connections?top=100` 查看连接分组，
+`/sb/debug/users?tag=面板标签` 查看热用户过期时间；multi 使用节点 `ApiConfig.PanelTag`，
+并非 `MultiApiConfig` 中首个面板的标签。`experimental.debug.listen` 省略时不会开放这些接口。
+
+`MasterPassword` 设置在节点级。自动 Trojan/AnyTLS 的客户端凭据为
+`MD5(面板原始 UUID + MasterPassword)` 的小写十六进制，拼接不增加分隔符、不去除空白。
+组合 AnyTLS 入口的子协议使用同一个派生值。空 MasterPassword 使用原凭据；
+Native、VMess、独立 VLESS 和 Shadowsocks 保持各自的凭据处理。
+运行对照的原版 `20260920` 在派生认证成功后存在 gateway 用户查找失败；
+重建版保留原 UUID 与计费身份，使该选项正常工作。这个故障修复是明确记录的行为差异。
+
+`ShadowsocksBanIP` 可以设置在根级或节点级，两者取 OR。
+启用的传统 SS 多用户和 VMess 入口共用来源 IP 计数，第三次候选读取/认证失败后封禁，
+按 Unix 整数秒加 60 过期；SS2022、共享密码 obfs 和其他协议不启用。
+使用 PROXY protocol 时，计数依据解析后的客户端来源 IP。
+
+所选 nyafw 原样本的 `CertConfig` 只有 `CertFile`、`KeyFile`、`SniPolicy`。
+它的 ACME 分支返回不支持错误，本分支的标准构建也不提供自动证书签发。
+
+静态模式将 YAML 节点设为 `StaticInbound: true`，JSON 入站设为
+`"use_panel_tag": "对应的 ApiConfig.PanelTag"`。静态 `users[].name` 应填写面板原 UUID，
+`password` 可自行设置。静态模式仅关联规则、限额、计费和日志，认证表保留在 JSON 中。
+一个面板可关联多个静态入站；没有监听时该节点仍执行面板同步。
+不设置 StaticInbound 的既有手工托管用法会继续更新协议认证表。
+
+所有代理 UDP 协议和 UDP 转发均排除，内部 DNS 保留配置语义。
+详细进度及证据限制见
+[完整复现清单](nyafw-parity.md)。完成原版运行对照前，不称为完整兼容版。

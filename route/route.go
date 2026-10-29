@@ -18,13 +18,13 @@ import (
 	"github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/bufio/deadline"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/uot"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/exp/slices"
 )
@@ -67,7 +67,12 @@ func (r *Router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	}
 }
 
-func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) error {
+func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext,
+	onClose N.CloseHandlerFunc,
+) (err error) {
+	if isUDPOverTCPDestination(metadata.Destination.Fqdn) {
+		return C.ErrUDPDisabled
+	}
 	//nolint:staticcheck
 	if metadata.InboundDetour != "" {
 		if metadata.LastInbound == metadata.InboundDetour {
@@ -90,22 +95,31 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	metadata.Network = N.NetworkTCP
 	switch metadata.Destination.Fqdn {
 	case mux.Destination.Fqdn:
-		return E.New("global multiplex is deprecated since sing-box v1.7.0, enable multiplex in Inbound fields instead.")
+		return r.routeLegacyMultiplex(ctx, conn, metadata, onClose)
 	case vmess.MuxDestination.Fqdn:
 		return E.New("global multiplex (v2ray legacy) not supported since sing-box v1.7.0.")
-	case uot.MagicAddress:
-		return E.New("global UoT not supported since sing-box v1.7.0.")
-	case uot.LegacyMagicAddress:
-		return E.New("global UoT (legacy) not supported since sing-box v1.7.0.")
 	}
 	if metadata.InboundType == C.TypeTun && metadata.Protocol == C.ProtocolDNS {
 		N.CloseOnHandshakeFailure(conn, onClose, r.hijackDNSStream(ctx, conn, metadata))
 		return nil
 	}
+	var nodeRequest adapter.ManagedNodeRequest
+	if tracker, ok := service.FromContext[adapter.ManagedNodePolicy](r.ctx).(adapter.ManagedNodeTracker); ok {
+		if nodeRequest, err = tracker.CheckNodeRequest(ctx, &metadata); err != nil {
+			return &R.RejectedError{Cause: err}
+		}
+	}
 	if deadline.NeedAdditionalReadDeadline(conn) {
 		conn = deadline.NewConn(conn)
 	}
-	selectedRule, _, buffers, _, err := r.matchRule(ctx, &metadata, conn, nil)
+	// Matching may add the node's accounting wrapper before a later route action fails.
+	// Close that returned wrapper, not just the original protocol socket, on every error.
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
+	selectedRule, _, buffers, _, conn, err := r.matchRule(ctx, &metadata, conn, nil, nodeRequest)
 	if err != nil {
 		return err
 	}
@@ -139,15 +153,17 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 			}
 		case *R.RuleActionReject:
 			buf.ReleaseMulti(buffers)
+			conn.Close()
 			if action.Method == C.RuleActionRejectMethodReply {
 				return E.New("reject method `reply` is not supported for TCP connections")
 			}
 			return action.Error(ctx)
 		case *R.RuleActionHijackDNS:
 			for _, buffer := range buffers {
-				conn = bufio.NewCachedConn(conn, buffer)
+				conn = newCachedConn(conn, buffer)
 			}
 			N.CloseOnHandshakeFailure(conn, onClose, r.hijackDNSStream(ctx, conn, metadata))
+			conn.Close()
 			return nil
 		}
 	}
@@ -161,7 +177,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	}
 
 	for _, buffer := range buffers {
-		conn = bufio.NewCachedConn(conn, buffer)
+		conn = newCachedConn(conn, buffer)
 	}
 	if selectedRule != nil {
 		metadata.RouteRule = selectedRule.String()
@@ -190,6 +206,7 @@ func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, m
 		} else {
 			r.logger.ErrorContext(ctx, err)
 		}
+		return err
 	}
 	select {
 	case <-done:
@@ -211,108 +228,32 @@ func (r *Router) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn,
 }
 
 func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) error {
+	// DNS interception terminates locally; packet forwarding, including UoT and detours, is disabled.
 	//nolint:staticcheck
-	if metadata.InboundDetour != "" {
-		if metadata.LastInbound == metadata.InboundDetour {
-			return E.New("routing loop on detour: ", metadata.InboundDetour)
-		}
-		detour, loaded := r.inbound.Get(metadata.InboundDetour)
-		if !loaded {
-			return E.New("inbound detour not found: ", metadata.InboundDetour)
-		}
-		injectable, isInjectable := detour.(adapter.UDPInjectableInbound)
-		if !isInjectable {
-			return E.New("inbound detour is not UDP injectable: ", metadata.InboundDetour)
-		}
-		metadata.LastInbound = metadata.Inbound
-		metadata.Inbound = metadata.InboundDetour
-		metadata.InboundDetour = ""
-		injectable.NewPacketConnection(ctx, conn, metadata, onClose)
-		return nil
+	if metadata.InboundDetour != "" || isUDPOverTCPDestination(metadata.Domain) {
+		return C.ErrUDPDisabled
 	}
-	// TODO: move to UoT
 	metadata.Network = N.NetworkUDP
-
-	// Currently we don't have deadline usages for UDP connections
-	/*if deadline.NeedAdditionalReadDeadline(conn) {
-		conn = deadline.NewPacketConn(bufio.NewNetPacketConn(conn))
-	}*/
 	if metadata.InboundType == C.TypeTun && metadata.Protocol == C.ProtocolDNS {
 		return r.hijackDNSPacket(ctx, conn, nil, metadata, onClose)
 	}
-	selectedRule, _, _, packetBuffers, err := r.matchRule(ctx, &metadata, nil, conn)
+	selectedRule, _, _, packetBuffers, _, err := r.matchRule(ctx, &metadata, nil, conn, nil)
 	if err != nil {
 		return err
 	}
-	var selectedOutbound adapter.Outbound
-	var selectReturn bool
 	if selectedRule != nil {
-		switch action := selectedRule.Action().(type) {
-		case *R.RuleActionRoute:
-			var loaded bool
-			selectedOutbound, loaded = r.outbound.Outbound(action.Outbound)
-			if !loaded {
-				N.ReleaseMultiPacketBuffer(packetBuffers)
-				return E.New("outbound not found: ", action.Outbound)
-			}
-			if !common.Contains(selectedOutbound.Network(), N.NetworkUDP) {
-				N.ReleaseMultiPacketBuffer(packetBuffers)
-				return E.New("UDP is not supported by outbound: ", selectedOutbound.Tag())
-			}
-		case *R.RuleActionBypass:
-			if action.Outbound == "" {
-				break
-			}
-			var loaded bool
-			selectedOutbound, loaded = r.outbound.Outbound(action.Outbound)
-			if !loaded {
-				N.ReleaseMultiPacketBuffer(packetBuffers)
-				return E.New("outbound not found: ", action.Outbound)
-			}
-			if !common.Contains(selectedOutbound.Network(), N.NetworkUDP) {
-				N.ReleaseMultiPacketBuffer(packetBuffers)
-				return E.New("UDP is not supported by outbound: ", selectedOutbound.Tag())
-			}
-		case *R.RuleActionReject:
-			N.ReleaseMultiPacketBuffer(packetBuffers)
-			if action.Method == C.RuleActionRejectMethodReply {
-				return E.New("reject method `reply` is not supported for UDP connections")
-			}
-			return action.Error(ctx)
-		case *R.RuleActionHijackDNS:
+		if _, hijackDNS := selectedRule.Action().(*R.RuleActionHijackDNS); hijackDNS {
 			return r.hijackDNSPacket(ctx, conn, packetBuffers, metadata, onClose)
 		}
 	}
-	if selectedRule == nil || selectReturn {
-		defaultOutbound := r.outbound.Default()
-		if !common.Contains(defaultOutbound.Network(), N.NetworkUDP) {
-			N.ReleaseMultiPacketBuffer(packetBuffers)
-			return E.New("UDP is not supported by outbound: ", defaultOutbound.Tag())
-		}
-		selectedOutbound = defaultOutbound
-	}
-	for _, buffer := range packetBuffers {
-		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
-		N.PutPacketBuffer(buffer)
-	}
-	if selectedRule != nil {
-		metadata.RouteRule = selectedRule.String()
-	}
-	metadata.RouteOutbound = selectedOutbound.Tag()
-	for _, tracker := range r.trackers {
-		conn = tracker.RoutedPacketConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
-	}
-	if metadata.FakeIP {
-		conn = newFakeIPNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, metadata.Destination)
-	}
-	if outboundHandler, isHandler := selectedOutbound.(adapter.PacketConnectionHandler); isHandler {
-		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
-	} else {
-		r.connection.NewPacketConnection(ctx, selectedOutbound, conn, metadata, onClose)
-	}
-	return nil
+	N.ReleaseMultiPacketBuffer(packetBuffers)
+	return C.ErrUDPDisabled
 }
 
+func isUDPOverTCPDestination(domain string) bool {
+	domain = strings.TrimSuffix(strings.ToLower(domain), ".")
+	return domain == uot.MagicAddress || domain == uot.LegacyMagicAddress
+}
 func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
 	ctx := log.ContextWithNewID(r.ctx)
 	metadata.PreMatch = true
@@ -320,6 +261,15 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 	packetDestination := metadata.Destination
 	err := r.prepareMatchMetadata(ctx, &metadata)
 	if err != nil {
+		return continueResult
+	}
+	if policy := service.FromContext[adapter.ManagedNodePolicy](r.ctx); metadata.Network == N.NetworkTCP &&
+		policy != nil && policy.HasNode(metadata.Inbound) {
+		// Managed policy needs the stream after legacy sniffing and explicit domain resolution.
+		return continueResult
+	}
+	if metadata.Network == N.NetworkTCP && (metadata.LegacyInboundOptions.SniffEnabled ||
+		(metadata.LegacyInboundOptions.DomainStrategy != 0 && metadata.Destination.IsDomain())) {
 		return continueResult
 	}
 	for currentRuleIndex, currentRule := range r.rules {
@@ -386,6 +336,9 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 			return r.preMatchFlow(ctx, &metadata, packetDestination, currentRule, action.Outbound)
 		case *R.RuleActionBypass:
 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
+			if metadata.Network == N.NetworkUDP {
+				return adapter.PreMatchResult{Action: adapter.PreMatchReject}
+			}
 			if action.Outbound == "" {
 				if metadata.Destination.IsDomain() || metadata.Destination != packetDestination {
 					return continueResult
@@ -449,7 +402,15 @@ func applyRouteOptionsOverride(metadata *adapter.InboundContext, routeOptions *R
 }
 
 func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundContext, packetDestination M.Socksaddr, matchedRule adapter.Rule, outboundTag string) adapter.PreMatchResult {
+	if metadata.Network == N.NetworkUDP {
+		return adapter.PreMatchResult{Action: adapter.PreMatchReject}
+	}
 	continueResult := adapter.PreMatchResult{Action: adapter.PreMatchContinue}
+	if r.ipOnDemand && matchedRule == nil && metadata.Destination.IsDomain() &&
+		len(metadata.DestinationAddresses) == 0 {
+		// The full routing path must resolve and retry rules before choosing the default outbound.
+		return continueResult
+	}
 	var outbound adapter.Outbound
 	if outboundTag == "" {
 		outbound = r.outbound.Default()
@@ -575,12 +536,8 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
 			metadata.FakeIP = true
 			r.logger.DebugContext(ctx, "found fakeip domain: ", domain)
 		}
-	} else if metadata.Domain == "" {
-		domain, loaded := r.dns.LookupReverseMapping(metadata.Destination.Addr)
-		if loaded {
-			metadata.Domain = domain
-			r.logger.DebugContext(ctx, "found reserve mapped domain: ", metadata.Domain)
-		}
+	} else if !metadata.LegacyInboundOptions.SniffEnabled || metadata.Network != N.NetworkTCP {
+		r.applyReverseMapping(ctx, metadata)
 	}
 	if metadata.Destination.IsIPv4() {
 		metadata.IPVersion = 4
@@ -590,20 +547,86 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
 	return nil
 }
 
+func (r *Router) applyReverseMapping(ctx context.Context, metadata *adapter.InboundContext) {
+	if metadata.Domain == "" {
+		domain, loaded := r.dns.LookupReverseMapping(metadata.Destination.Addr)
+		if loaded {
+			metadata.Domain = domain
+			r.logger.DebugContext(ctx, "found reverse mapped domain: ", metadata.Domain)
+		}
+	}
+}
+
 func (r *Router) matchRule(
 	ctx context.Context, metadata *adapter.InboundContext,
 	inputConn net.Conn, inputPacketConn N.PacketConn,
+	nodeRequest adapter.ManagedNodeRequest,
 ) (
 	selectedRule adapter.Rule, selectedRuleIndex int,
-	buffers []*buf.Buffer, packetBuffers []*N.PacketBuffer, fatalErr error,
+	buffers []*buf.Buffer, packetBuffers []*N.PacketBuffer, routedConn net.Conn, fatalErr error,
 ) {
+	routedConn = inputConn
+	defer func() {
+		if fatalErr != nil {
+			buf.ReleaseMulti(buffers)
+			N.ReleaseMultiPacketBuffer(packetBuffers)
+			buffers = nil
+			packetBuffers = nil
+		}
+	}()
 	fatalErr = r.prepareMatchMetadata(ctx, metadata)
 	if fatalErr != nil {
 		return
 	}
 
+	sniffOriginalIP, legacyBuffer, legacyErr := r.applyLegacyInboundOptions(ctx, metadata, inputConn)
+	if legacyBuffer != nil {
+		buffers = append(buffers, legacyBuffer)
+	}
+	if legacyErr != nil {
+		fatalErr = legacyErr
+		return
+	}
+	if policy := service.FromContext[adapter.ManagedNodePolicy](r.ctx); metadata.Network == N.NetworkTCP &&
+		policy != nil {
+		checkPolicy := policy.Check
+		if nodeRequest != nil {
+			checkPolicy = nodeRequest.CheckPolicy
+		}
+		if policyErr := checkPolicy(ctx, metadata, inputConn); policyErr != nil {
+			fatalErr = &R.RejectedError{Cause: policyErr}
+			return
+		}
+		if tracker, ok := policy.(adapter.ManagedNodeTracker); ok && inputConn != nil {
+			// Legacy sniffing ran before accounting. Replay its bytes through the wrapper once.
+			// Any later route-action sniffing already reads the wrapped stream, so its own
+			// buffers remain outside that wrapper when the selected outbound consumes them.
+			for _, buffer := range buffers {
+				inputConn = newCachedConn(inputConn, buffer)
+			}
+			buffers = nil
+			routedConn = inputConn
+			trackConnection := tracker.TrackNodeConnection
+			if nodeRequest != nil {
+				trackConnection = nodeRequest.TrackConnection
+			}
+			tracked, trackErr := trackConnection(ctx, inputConn, metadata)
+			if trackErr != nil {
+				fatalErr = &R.RejectedError{Cause: trackErr}
+				return
+			}
+			inputConn = tracked
+			routedConn = tracked
+		}
+	}
+	onDemandPending := r.ipOnDemand && metadata.Network == N.NetworkTCP
+	var executedActions map[int]bool
+retry:
 match:
 	for currentRuleIndex, currentRule := range r.rules {
+		if executedActions[currentRuleIndex] {
+			continue
+		}
 		metadata.ResetRuleCache()
 		if !currentRule.Match(metadata) {
 			continue
@@ -632,6 +655,7 @@ match:
 			}
 			if routeOptions.OverrideAddress.IsValid() {
 				metadata.DestinationAddresses = nil
+				sniffOriginalIP = netip.Addr{}
 			}
 			applyRouteOptionsOverride(metadata, routeOptions)
 			if routeOptions.NetworkStrategy != nil {
@@ -669,6 +693,7 @@ match:
 		}
 		switch action := currentRule.Action().(type) {
 		case *R.RuleActionSniff:
+			originalDestination := metadata.Destination
 			newBuffer, newPacketBuffers, newErr := r.actionSniff(ctx, metadata, action, inputConn, inputPacketConn, buffers, packetBuffers)
 			if newBuffer != nil {
 				buffers = append(buffers, newBuffer)
@@ -678,6 +703,9 @@ match:
 			if newErr != nil {
 				fatalErr = newErr
 				return
+			}
+			if onDemandPending && !metadata.FakeIP && originalDestination.IsIP() && metadata.Destination.IsDomain() {
+				sniffOriginalIP = originalDestination.Addr
 			}
 		case *R.RuleActionResolve:
 			fatalErr = r.actionResolve(ctx, metadata, action)
@@ -695,13 +723,27 @@ match:
 		}
 		if actionType == C.RuleActionTypeBypass {
 			bypassAction := currentRule.Action().(*R.RuleActionBypass)
-			if bypassAction.Outbound == "" {
-				continue match
+			if bypassAction.Outbound != "" {
+				selectedRule = currentRule
+				selectedRuleIndex = currentRuleIndex
+				break match
 			}
-			selectedRule = currentRule
-			selectedRuleIndex = currentRuleIndex
-			break match
 		}
+		if onDemandPending {
+			if executedActions == nil {
+				executedActions = make(map[int]bool)
+			}
+			executedActions[currentRuleIndex] = true
+		}
+	}
+	if selectedRule == nil && onDemandPending && metadata.Destination.IsDomain() &&
+		len(metadata.DestinationAddresses) == 0 {
+		onDemandPending = false
+		fatalErr = r.resolveIPOnDemand(ctx, metadata, sniffOriginalIP)
+		if fatalErr != nil {
+			return
+		}
+		goto retry
 	}
 	return
 }

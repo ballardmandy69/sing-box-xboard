@@ -5,6 +5,32 @@ on:
     branches: [main]
     paths:
       - 'third_party/sing-anytls/**'
+      - 'third_party/sing-vmess/**'
+      - 'third_party/sing-shadowsocks/**'
+      - 'common/usercontrol/**'
+      - 'common/authban/**'
+      - 'common/memoryguard/**'
+      - 'common/nodepolicy/**'
+      - 'common/sniff/**'
+      - 'common/tls/**'
+      - 'option/tls.go'
+      - 'option/trojan.go'
+      - 'option/vmess.go'
+      - 'option/shadowsocks.go'
+      - 'box.go'
+      - 'adapter/node_policy.go'
+      - 'adapter/debug.go'
+      - 'debug*.go'
+      - 'experimental/libbox/internal/oomprofile/**'
+      - 'protocol/vmess/**'
+      - 'protocol/vless/**'
+      - 'protocol/shadowsocks/**'
+      - 'route/**'
+      - 'dns/**'
+      - 'service/ssmapi/**'
+      - 'option/nyafw.go'
+      - 'nyafw*.go'
+      - 'tcp_only*.go'
       - 'protocol/anytls/**'
       - 'protocol/trojan/**'
       - 'transport/trojan/**'
@@ -38,6 +64,32 @@ on:
   pull_request:
     paths:
       - 'third_party/sing-anytls/**'
+      - 'third_party/sing-vmess/**'
+      - 'third_party/sing-shadowsocks/**'
+      - 'common/usercontrol/**'
+      - 'common/authban/**'
+      - 'common/memoryguard/**'
+      - 'common/nodepolicy/**'
+      - 'common/sniff/**'
+      - 'common/tls/**'
+      - 'option/tls.go'
+      - 'option/trojan.go'
+      - 'option/vmess.go'
+      - 'option/shadowsocks.go'
+      - 'box.go'
+      - 'adapter/node_policy.go'
+      - 'adapter/debug.go'
+      - 'debug*.go'
+      - 'experimental/libbox/internal/oomprofile/**'
+      - 'protocol/vmess/**'
+      - 'protocol/vless/**'
+      - 'protocol/shadowsocks/**'
+      - 'route/**'
+      - 'dns/**'
+      - 'service/ssmapi/**'
+      - 'option/nyafw.go'
+      - 'nyafw*.go'
+      - 'tcp_only*.go'
       - 'protocol/anytls/**'
       - 'protocol/trojan/**'
       - 'transport/trojan/**'
@@ -94,5 +146,25 @@ jobs:
           ./adapter/inbound ./common/listener ./common/dialer
       - name: Build client and server
         run: go build -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+      - name: Restored routing, DNS, accounting and TCP protocol behavior
+        run: >-
+          go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/...
+          ./dns/... ./common/usercontrol ./common/authban ./common/memoryguard
+          ./common/nodepolicy ./common/sniff ./common/tls
+          ./service/ssmapi . -count=1 -timeout=180s
+      - name: Restored runtime races
+        run: >-
+          go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/...
+          ./dns/... ./common/usercontrol ./common/authban ./common/memoryguard
+          ./common/nodepolicy ./common/sniff ./common/tls
+          ./service/ssmapi . -count=1 -timeout=180s
+      - name: OOM profile generation with default Go link checks
+        run: go test ./experimental/libbox/internal/oomprofile ./experimental/libbox ./experimental/boxdd -count=1 -timeout=90s
+      - name: VMess credential generations and hot authentication
+        working-directory: third_party/sing-vmess
+        run: go test -race ./... -count=1 -timeout=180s
+      - name: Shadowsocks credential generations and hot authentication
+        working-directory: third_party/sing-shadowsocks
+        run: go test -race ./... -count=1 -timeout=180s
       - name: Install and update deployment
         run: SING_BOX_BINARY="$RUNNER_TEMP/sing-box" bash test/install_test.sh

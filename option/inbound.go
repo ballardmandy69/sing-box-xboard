@@ -19,9 +19,10 @@ type InboundOptionsRegistry interface {
 }
 
 type _Inbound struct {
-	Type    string `json:"type"`
-	Tag     string `json:"tag,omitempty"`
-	Options any    `json:"-"`
+	Type        string `json:"type"`
+	Tag         string `json:"tag,omitempty"`
+	UsePanelTag string `json:"use_panel_tag,omitempty"`
+	Options     any    `json:"-"`
 }
 
 type Inbound _Inbound
@@ -47,12 +48,6 @@ func (h *Inbound) UnmarshalJSONContext(ctx context.Context, content []byte) erro
 	if err != nil {
 		return err
 	}
-	if listenWrapper, isListen := options.(ListenOptionsWrapper); isListen {
-		//nolint:staticcheck
-		if listenWrapper.TakeListenOptions().InboundOptions != (InboundOptions{}) {
-			return E.New("legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, checkout migration: https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions")
-		}
-	}
 	h.Options = options
 	return nil
 }
@@ -74,6 +69,10 @@ type InboundOptions struct {
 	SniffTimeout              badoption.Duration `json:"sniff_timeout,omitempty" schema:"omit"`
 	DomainStrategy            DomainStrategy     `json:"domain_strategy,omitempty" schema:"omit"`
 	UDPDisableDomainUnmapping bool               `json:"udp_disable_domain_unmapping,omitempty" schema:"omit"`
+}
+
+func (o InboundOptions) TakeLegacyInboundOptions() InboundOptions {
+	return o
 }
 
 type ListenOptions struct {
@@ -98,7 +97,7 @@ type ListenOptions struct {
 	ProxyProtocol bool `json:"proxy_protocol,omitempty" schema:"omit"`
 	// ProxyProtocolAcceptNoHeader also accepts ordinary TCP connections without a PROXY header.
 	ProxyProtocolAcceptNoHeader bool `json:"proxy_protocol_accept_no_header,omitempty" schema:"omit"`
-	// Legacy inbound fields are rejected since sing-box 1.13.0.
+	// Legacy inbound fields are applied by the per-inbound router adapter.
 	//nolint:staticcheck
 	InboundOptions `schema:"omit"`
 }

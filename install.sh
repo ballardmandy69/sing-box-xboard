@@ -124,6 +124,31 @@ for name in "${package_files[@]}"; do
 done
 chmod 0755 "$TMP_DIR/package/sing-box"
 
+certificate_files=()
+mkdir "$TMP_DIR/certificates"
+for name in zq.key zq.crt zq.pem; do
+  if [ -e "$INSTALL_DIR/$name" ] || [ -L "$INSTALL_DIR/$name" ]; then
+    [ -f "$INSTALL_DIR/$name" ] && [ ! -L "$INSTALL_DIR/$name" ] ||
+      error "TLS material must be a regular file: $name"
+  fi
+done
+if [ ! -e "$INSTALL_DIR/zq.key" ] && [ ! -e "$INSTALL_DIR/zq.crt" ] && [ ! -e "$INSTALL_DIR/zq.pem" ]; then
+  command -v openssl >/dev/null 2>&1 || error "openssl is required to generate the initial TLS certificate"
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout "$TMP_DIR/certificates/zq.key" -x509 -days 365 \
+    -out "$TMP_DIR/certificates/zq.crt" -subj / > "$TMP_DIR/certificate.log" 2>&1 ||
+    error "initial TLS certificate generation failed"
+  cat "$TMP_DIR/certificates/zq.crt" "$TMP_DIR/certificates/zq.key" > "$TMP_DIR/certificates/zq.pem"
+  certificate_files=(zq.key zq.crt zq.pem)
+elif [ -f "$INSTALL_DIR/zq.key" ] && [ -f "$INSTALL_DIR/zq.crt" ]; then
+  if [ ! -e "$INSTALL_DIR/zq.pem" ]; then
+    cat "$INSTALL_DIR/zq.crt" "$INSTALL_DIR/zq.key" > "$TMP_DIR/certificates/zq.pem"
+    certificate_files=(zq.pem)
+  fi
+else
+  error "incomplete zq TLS files; restore the matching zq.key and zq.crt before installing"
+fi
+
 new_config=false
 if [ -e "$INSTALL_DIR/config.json" ]; then
   [ -f "$INSTALL_DIR/config.json" ] && [ ! -L "$INSTALL_DIR/config.json" ] || error "config.json must be a regular file"
@@ -143,12 +168,6 @@ if [ -e "$INSTALL_DIR/$INSTANCE.yml" ]; then
 else
   cp -- "$TMP_DIR/package/server.xboard.yml" "$TMP_DIR/config/$INSTANCE.yml"
 fi
-check_directory="$TMP_DIR/config"
-[ ! -d "$INSTALL_DIR" ] || check_directory="$INSTALL_DIR"
-(cd "$check_directory" && "$TMP_DIR/package/sing-box" check \
-  -c "$TMP_DIR/config/config.json" -s "$TMP_DIR/config/$INSTANCE.yml") ||
-  error "configuration check failed; installation was not changed"
-
 for kind in sb sbc; do
   json_name=config.json
   [ "$kind" != sbc ] || json_name='%i.json'
@@ -176,6 +195,9 @@ done
 install_targets=("$INSTALL_DIR/sing-box" "$INSTALL_DIR/install.sh" "$INSTALL_DIR/sb-auto.sh"
   "$INSTALL_DIR/USAGE.md" "$INSTALL_DIR/anytls-native.md" "$INSTALL_DIR/LICENSE" "$INSTALL_DIR/ANYTLS-LICENSE"
   "$SYSTEMD_DIR/${SERVICE_PREFIX}sb@.service" "$SYSTEMD_DIR/${SERVICE_PREFIX}sbc@.service")
+for name in "${certificate_files[@]}"; do
+  install_targets+=("$INSTALL_DIR/$name")
+done
 if [ "$new_config" = true ]; then
   install_targets+=("$INSTALL_DIR/config.json")
 fi
@@ -196,6 +218,14 @@ for index in "${!install_targets[@]}"; do
 done
 install_started=true
 mkdir -p -- "$INSTALL_DIR/examples" "$SYSTEMD_DIR"
+for name in "${certificate_files[@]}"; do
+  atomic_install 0600 "$TMP_DIR/certificates/$name" "$INSTALL_DIR/$name"
+done
+# Check from the real working directory so both generated zq files and existing relative
+# certificate paths resolve correctly. The transaction removes new files on any failure.
+(cd "$INSTALL_DIR" && "$TMP_DIR/package/sing-box" check \
+  -c "$TMP_DIR/config/config.json" -s "$TMP_DIR/config/$INSTANCE.yml") ||
+  error "configuration check failed; restoring previous installation"
 if [ "$new_config" = true ]; then
   atomic_install 0600 "$TMP_DIR/config/config.json" "$INSTALL_DIR/config.json"
 fi
@@ -219,6 +249,9 @@ systemctl daemon-reload || error "systemd reload failed; restoring previous inst
 install_started=false
 info "installed sing-box XBoard $VERSION ($ARCH) in $INSTALL_DIR"
 info "existing configuration and keys were preserved; services were not started or restarted"
+if [ "${#certificate_files[@]}" -gt 0 ]; then
+  info "created missing default TLS material: ${certificate_files[*]}"
+fi
 info "add Nodes to $INSTALL_DIR/$INSTANCE.yml with panel URL, API key, node ID and any required certificate paths"
 info "review $INSTALL_DIR/config.json, then run: systemctl enable --now ${SERVICE_PREFIX}sb@${INSTANCE}.service"
 info "no PRODUCT, identity UUID or activation verification is required"

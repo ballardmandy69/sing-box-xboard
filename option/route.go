@@ -8,6 +8,7 @@ type RouteOptions struct {
 	Rules                      []Rule                            `json:"rules,omitempty"`
 	RuleSet                    []RuleSet                         `json:"rule_set,omitempty"`
 	Final                      string                            `json:"final,omitempty" reference:"outbound"`
+	IPOnDemand                 bool                              `json:"ip_on_demand,omitempty"`
 	FindProcess                bool                              `json:"find_process,omitempty"`
 	FindNeighbor               bool                              `json:"find_neighbor,omitempty"`
 	DHCPLeaseFiles             badoption.Listable[string]        `json:"dhcp_lease_files,omitempty"`

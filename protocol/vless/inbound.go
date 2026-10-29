@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"os"
-	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -41,43 +40,56 @@ type Inbound struct {
 	router      adapter.ConnectionRouterEx
 	logger      logger.ContextLogger
 	listener    *listener.Listener
-	users       []option.VLESSUser
-	usersAccess sync.RWMutex
 	tracker     adapter.SSMTracker
-	service     *vless.Service[int]
+	service     *vless.Service[inboundUserIdentity]
 	tlsConfig   tls.ServerConfig
 	transport   adapter.V2RayServerTransport
 	references  []string
+	forceVision bool
+}
+
+// inboundUserIdentity retains the authenticated generation's name and unnamed-user index.
+// @author lyt
+// @date 2026-10-29
+type inboundUserIdentity struct {
+	Name  string
+	Index int
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSInboundOptions) (adapter.Inbound, error) {
 	inbound := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeVLESS, tag),
-		ctx:     ctx,
-		router:  uot.NewRouter(router, logger),
-		logger:  logger,
-		users:   options.Users,
+		Adapter:     inbound.NewAdapter(C.TypeVLESS, tag),
+		ctx:         ctx,
+		router:      uot.NewRouter(router, logger),
+		logger:      logger,
+		forceVision: common.PtrValueOrDefault(options.ForceVision),
 	}
 	var err error
 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
 	if err != nil {
 		return nil, err
 	}
-	service := vless.NewService[int](logger, adapter.NewUpstreamContextHandler(inbound.newConnectionEx, inbound.newPacketConnectionEx))
-	service.UpdateUsers(common.MapIndexed(inbound.users, func(index int, _ option.VLESSUser) int {
-		return index
-	}), common.Map(inbound.users, func(it option.VLESSUser) string {
+	service := vless.NewService[inboundUserIdentity](logger, adapter.NewUpstreamContextHandler(inbound.newConnectionEx, inbound.newPacketConnectionEx))
+	userIdentities := common.MapIndexed(options.Users, func(index int, user option.VLESSUser) inboundUserIdentity {
+		return inboundUserIdentity{Name: user.Name, Index: index}
+	})
+	userCredentials := common.Map(options.Users, func(it option.VLESSUser) string {
 		return it.UUID
-	}), common.Map(inbound.users, func(it option.VLESSUser) string {
-		return it.Flow
-	}))
+	})
+	if options.ForceVision != nil {
+		service.UpdateUsersWithClientFlow(userIdentities, userCredentials, inbound.forceVision)
+	} else {
+		service.UpdateUsers(userIdentities, userCredentials, common.Map(options.Users, func(it option.VLESSUser) string {
+			return it.Flow
+		}))
+	}
 	inbound.service = service
 	if options.TLS != nil {
 		inbound.tlsConfig, err = tls.NewServerWithOptions(tls.ServerOptions{
 			Context: ctx,
 			Logger:  logger,
 			Options: common.PtrValueOrDefault(options.TLS),
-			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
+			KTLSCompatible: options.ForceVision == nil && common.PtrValueOrDefault(options.Transport).Type == "" &&
 				!common.PtrValueOrDefault(options.Multiplex).Enabled &&
 				common.All(options.Users, func(it option.VLESSUser) bool {
 					return it.Flow == ""
@@ -175,45 +187,43 @@ func (h *Inbound) SetTracker(tracker adapter.SSMTracker) {
 	h.tracker = tracker
 }
 
-func (h *Inbound) UpdateUsers(users []string, _ []string) error {
-	h.usersAccess.Lock()
-	defer h.usersAccess.Unlock()
-	updated := common.Map(users, func(user string) option.VLESSUser {
-		return option.VLESSUser{Name: user, UUID: user}
+func (h *Inbound) UpdateUsers(users []string, credentials []string) error {
+	updated := common.MapIndexed(users, func(index int, user string) option.VLESSUser {
+		uuid := user
+		if index < len(credentials) && credentials[index] != "" {
+			uuid = credentials[index]
+		}
+		return option.VLESSUser{Name: user, UUID: uuid}
 	})
-	h.service.UpdateUsers(common.MapIndexed(updated, func(index int, _ option.VLESSUser) int { return index }),
-		common.Map(updated, func(user option.VLESSUser) string { return user.UUID }),
-		common.Map(updated, func(user option.VLESSUser) string { return user.Flow }))
-	h.users = updated
+	h.service.UpdateUsersWithClientFlow(common.MapIndexed(updated, func(index int, user option.VLESSUser) inboundUserIdentity {
+		return inboundUserIdentity{Name: user.Name, Index: index}
+	}),
+		common.Map(updated, func(user option.VLESSUser) string { return user.UUID }), h.forceVision)
 	return nil
-}
-
-func (h *Inbound) userName(userIndex int) string {
-	h.usersAccess.RLock()
-	defer h.usersAccess.RUnlock()
-	if userIndex < 0 || userIndex >= len(h.users) {
-		return ""
-	}
-	return h.users[userIndex].Name
 }
 
 func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[inboundUserIdentity](ctx)
 	if !loaded {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.userName(userIndex)
+	user := identity.Name
 	if user == "" {
-		user = F.ToString(userIndex)
+		user = F.ToString(identity.Index)
 	} else {
 		metadata.User = user
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 	if h.tracker != nil {
-		conn = h.tracker.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, h.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
@@ -221,14 +231,14 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[inboundUserIdentity](ctx)
 	if !loaded {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.userName(userIndex)
+	user := identity.Name
 	if user == "" {
-		user = F.ToString(userIndex)
+		user = F.ToString(identity.Index)
 	} else {
 		metadata.User = user
 	}
@@ -240,7 +250,12 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
 	}
 	if h.tracker != nil {
-		conn = h.tracker.TrackPacketConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackPacketConnection(ctx, h.tracker, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }

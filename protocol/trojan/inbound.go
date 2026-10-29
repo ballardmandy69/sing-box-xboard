@@ -43,6 +43,7 @@ type Inbound struct {
 	fallbackAddrTLSNextProto map[string]M.Socksaddr
 	transport                adapter.V2RayServerTransport
 	references               []string
+	forceMux                 bool
 }
 
 // inboundUserIdentity keeps the authenticated identity independent of later user-list ordering.
@@ -62,9 +63,10 @@ type inboundTracker struct {
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TrojanInboundOptions) (adapter.Inbound, error) {
 	inbound := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeTrojan, tag),
-		router:  router,
-		logger:  logger,
+		Adapter:  inbound.NewAdapter(C.TypeTrojan, tag),
+		router:   router,
+		logger:   logger,
+		forceMux: options.ForceMux,
 	}
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServerWithOptions(tls.ServerOptions{
@@ -108,6 +110,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	}
 	service := trojan.NewService[inboundUserIdentity](
 		adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
+	service.SetServerPadding(options.ServerPadding)
 	err := service.UpdateUsers(common.MapIndexed(options.Users, func(index int, it option.TrojanUser) inboundUserIdentity {
 		return inboundUserIdentity{Name: it.Name, Index: index}
 	}), common.Map(options.Users, func(it option.TrojanUser) string {
@@ -225,6 +228,13 @@ func (h *Inbound) UpdateUsers(users []string, uPSKs []string) error {
 }
 
 func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	if h.forceMux {
+		if err := trojan.CheckForceMux(metadata.Source, metadata.Destination); err != nil {
+			h.logger.DebugContext(ctx, "reject non-multiplex IPv4 Trojan connection")
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
+	}
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
 	identity, loaded := auth.UserFromContext[inboundUserIdentity](ctx)
@@ -240,7 +250,12 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 	if tracker := h.tracker.Load(); tracker != nil {
-		conn = tracker.value.TrackConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackConnection(ctx, tracker.value, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
@@ -261,7 +276,12 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
 	if tracker := h.tracker.Load(); tracker != nil {
-		conn = tracker.value.TrackPacketConnection(conn, metadata)
+		var err error
+		conn, err = adapter.TrackPacketConnection(ctx, tracker.value, conn, metadata)
+		if err != nil {
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			return
+		}
 	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }

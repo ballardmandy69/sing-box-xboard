@@ -2,22 +2,27 @@ package xboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/log"
 )
 
+var errCachedUsersInvalid = errors.New("cached automatic inbound users are invalid")
+
 type autoInboundConfig struct {
-	protocol string
-	options  any
-	endpoint netip.AddrPort
+	protocol       string
+	options        any
+	endpoint       netip.AddrPort
+	masterPassword string
 }
 
 type autoInboundInstance struct {
@@ -33,18 +38,22 @@ type autoInboundInstance struct {
 // @date 2026-10-29
 type autoInbound struct {
 	inbound.Adapter
-	ctx         context.Context
-	registry    adapter.InboundRegistry
-	router      adapter.Router
-	logger      log.ContextLogger
-	access      sync.Mutex
-	current     *autoInboundInstance
-	stage       int
-	cleanupSet  bool
-	closed      bool
-	tracker     adapter.SSMTracker
-	users       []string
-	credentials []string
+	ctx          context.Context
+	registry     adapter.InboundRegistry
+	router       adapter.Router
+	logger       log.ContextLogger
+	access       sync.Mutex
+	current      *autoInboundInstance
+	stage        int
+	cleanupSet   bool
+	closed       bool
+	tracker      adapter.SSMTracker
+	users        []string
+	credentials  []string
+	passwords    []string
+	protocolType atomic.Pointer[string]
+	hotUsers     []string
+	hotCallback  func(string)
 }
 
 var _ adapter.ManagedSSMServer = (*autoInbound)(nil)
@@ -52,16 +61,37 @@ var _ adapter.ManagedSSMServer = (*autoInbound)(nil)
 func newAutoInbound(ctx context.Context, registry adapter.InboundRegistry, router adapter.Router,
 	logger log.ContextLogger, tag string, config autoInboundConfig,
 ) (*autoInbound, error) {
-	h := &autoInbound{
-		Adapter: inbound.NewAdapter(config.protocol, tag), ctx: ctx,
-		registry: registry, router: router, logger: logger, stage: -1,
-	}
+	h := newEmptyAutoInbound(ctx, registry, router, logger, tag, config.protocol)
 	instance, err := h.construct(config)
 	if err != nil {
 		return nil, err
 	}
 	h.current = instance
 	return h, nil
+}
+
+func newEmptyAutoInbound(ctx context.Context, registry adapter.InboundRegistry, router adapter.Router,
+	logger log.ContextLogger, tag, protocol string,
+) *autoInbound {
+	h := &autoInbound{
+		Adapter: inbound.NewAdapter(protocol, tag), ctx: ctx,
+		registry: registry, router: router, logger: logger, stage: -1,
+	}
+	h.protocolType.Store(&protocol)
+	return h
+}
+
+func (h *autoInbound) Type() string {
+	if protocol := h.protocolType.Load(); protocol != nil {
+		return *protocol
+	}
+	return h.Adapter.Type()
+}
+
+func (h *autoInbound) hasCurrent() bool {
+	h.access.Lock()
+	defer h.access.Unlock()
+	return h.current != nil && !h.closed
 }
 
 func (h *autoInbound) construct(config autoInboundConfig) (*autoInboundInstance, error) {
@@ -90,8 +120,10 @@ func (h *autoInbound) Start(stage adapter.StartStage, scope *adapter.Scope) erro
 		h.cleanupSet = true
 	}
 	for next := h.stage + 1; next <= int(stage); next++ {
-		if err := h.startInstance(h.current, adapter.StartStage(next)); err != nil {
-			return err
+		if h.current != nil {
+			if err := h.startInstance(h.current, adapter.StartStage(next)); err != nil {
+				return err
+			}
 		}
 		h.stage = next
 	}
@@ -110,22 +142,79 @@ func (h *autoInbound) SetTracker(tracker adapter.SSMTracker) {
 	h.access.Lock()
 	defer h.access.Unlock()
 	h.tracker = tracker
-	if !h.closed {
+	if !h.closed && h.current != nil {
 		h.current.inbound.SetTracker(tracker)
 	}
 }
 
 func (h *autoInbound) UpdateUsers(users, credentials []string) error {
+	return h.updatePanelUsers(users, credentials, make([]string, len(credentials)))
+}
+
+func (h *autoInbound) updatePanelUsers(users, credentials, passwords []string) error {
 	h.access.Lock()
 	defer h.access.Unlock()
 	if h.closed {
 		return net.ErrClosed
 	}
-	if err := h.current.inbound.UpdateUsers(users, credentials); err != nil {
-		return err
+	if len(users) != len(credentials) || len(users) != len(passwords) {
+		return fmt.Errorf("%w: users and credentials have different lengths", errCachedUsersInvalid)
+	}
+	if h.current != nil {
+		if err := h.current.updatePanelUsers(users, credentials, passwords); err != nil {
+			return err
+		}
+		if manager, ok := h.current.inbound.(adapter.HotUserManager); ok {
+			manager.UpdateHotUsers(h.hotUsers)
+		}
 	}
 	h.users = slices.Clone(users)
 	h.credentials = slices.Clone(credentials)
+	h.passwords = slices.Clone(passwords)
+	return nil
+}
+
+func (h *autoInbound) UpdateHotUsers(users []string) {
+	h.access.Lock()
+	defer h.access.Unlock()
+	h.hotUsers = slices.Clone(users)
+	if !h.closed && h.current != nil {
+		if manager, ok := h.current.inbound.(adapter.HotUserManager); ok {
+			manager.UpdateHotUsers(users)
+		}
+	}
+}
+
+func (h *autoInbound) SetHotUserCallback(callback func(string)) {
+	h.access.Lock()
+	defer h.access.Unlock()
+	h.hotCallback = callback
+	if !h.closed && h.current != nil {
+		if manager, ok := h.current.inbound.(adapter.HotUserManager); ok {
+			manager.SetHotUserCallback(callback)
+		}
+	}
+}
+
+func (i *autoInboundInstance) updateUsers(users, originalCredentials []string) error {
+	return i.updatePanelUsers(users, originalCredentials, make([]string, len(originalCredentials)))
+}
+
+func (i *autoInboundInstance) updatePanelUsers(users, uuids, passwords []string) error {
+	credentials, err := i.config.panelCredentials(uuids, passwords)
+	if err != nil {
+		return fmt.Errorf("%w: credential conversion failed", errCachedUsersInvalid)
+	}
+	if server, ok := i.inbound.(interface {
+		UpdateUsersWithUUIDs([]string, []string, []string) error
+	}); ok {
+		err = server.UpdateUsersWithUUIDs(users, credentials, uuids)
+	} else {
+		err = i.inbound.UpdateUsers(users, credentials)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: user application failed", errCachedUsersInvalid)
+	}
 	return nil
 }
 
@@ -135,7 +224,7 @@ func (h *autoInbound) replace(config autoInboundConfig) error {
 		h.access.Unlock()
 		return net.ErrClosed
 	}
-	if reflect.DeepEqual(h.current.config, config) && h.current.stage == h.stage {
+	if h.current != nil && reflect.DeepEqual(h.current.config, config) && h.current.stage == h.stage {
 		h.access.Unlock()
 		return nil
 	}
@@ -145,7 +234,7 @@ func (h *autoInbound) replace(config autoInboundConfig) error {
 		return err
 	}
 	previous := h.current
-	conflicts := h.stage >= int(adapter.StartStateStart) &&
+	conflicts := previous != nil && h.stage >= int(adapter.StartStateStart) &&
 		conflictingEndpoint(previous.config.endpoint, config.endpoint)
 	var rollback *autoInboundInstance
 	if conflicts {
@@ -174,6 +263,7 @@ func (h *autoInbound) replace(config autoInboundConfig) error {
 		return err
 	}
 	h.current = candidate
+	h.protocolType.Store(&config.protocol)
 	if rollback != nil {
 		rollback.scope.Close()
 	} else {
@@ -190,9 +280,13 @@ func (h *autoInbound) prepare(config autoInboundConfig) (*autoInboundInstance, e
 		return nil, err
 	}
 	instance.inbound.SetTracker(h.tracker)
-	if err = instance.inbound.UpdateUsers(h.users, h.credentials); err != nil {
+	if err = instance.updatePanelUsers(h.users, h.credentials, h.passwords); err != nil {
 		instance.scope.Close()
 		return nil, err
+	}
+	if manager, ok := instance.inbound.(adapter.HotUserManager); ok {
+		manager.UpdateHotUsers(h.hotUsers)
+		manager.SetHotUserCallback(h.hotCallback)
 	}
 	return instance, nil
 }
@@ -207,6 +301,9 @@ func (h *autoInbound) startPrepared(instance *autoInboundInstance) error {
 }
 
 func (h *autoInbound) closeInstance(instance *autoInboundInstance) {
+	if instance == nil {
+		return
+	}
 	if err := instance.scope.Close(); err != nil {
 		h.logger.Error("xboard previous inbound cleanup failed: ", h.Tag(), ": ", err)
 	}
@@ -224,5 +321,8 @@ func (h *autoInbound) close() error {
 		return nil
 	}
 	h.closed = true
+	if h.current == nil {
+		return nil
+	}
 	return h.current.scope.Close()
 }

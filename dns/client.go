@@ -38,6 +38,7 @@ type Client struct {
 	timeout           time.Duration
 	disableCache      bool
 	disableExpire     bool
+	legacySharedCache bool
 	optimisticTimeout time.Duration
 	cacheCapacity     uint32
 	clientSubnet      netip.Prefix
@@ -57,6 +58,7 @@ type ClientOptions struct {
 	Timeout           time.Duration
 	DisableCache      bool
 	DisableExpire     bool
+	LegacySharedCache bool
 	OptimisticTimeout time.Duration
 	CacheCapacity     uint32
 	ClientSubnet      netip.Prefix
@@ -72,6 +74,7 @@ func NewClient(options ClientOptions) *Client {
 		timeout:           options.Timeout,
 		disableCache:      options.DisableCache,
 		disableExpire:     options.DisableExpire,
+		legacySharedCache: options.LegacySharedCache,
 		optimisticTimeout: options.OptimisticTimeout,
 		cacheCapacity:     cacheCapacity,
 		clientSubnet:      options.ClientSubnet,
@@ -122,15 +125,38 @@ func (c *Client) newCacheKey(transport adapter.DNSTransport, question dns.Questi
 			clientSubnet = clientSubnetFromMessage(message)
 		}
 	}
-	return dnsCacheKey{
+	key := dnsCacheKey{
 		Question:     question,
-		transportTag: transport.Tag(),
 		clientSubnet: clientSubnet,
-		environment:  c.environmentHash(transport),
 	}
+	if transport != nil && (!c.legacySharedCache || transport.Type() == C.DNSTypeFakeIP) {
+		key.transportTag = transport.Tag()
+		key.environment = c.environmentHash(transport)
+	}
+	return key
+}
+
+// exchangeLegacyCache runs before DNS rule selection, as in the original shared-cache router.
+func (c *Client) exchangeLegacyCache(ctx context.Context, message *dns.Msg,
+	options adapter.DNSQueryOptions,
+) *dns.Msg {
+	if !c.legacySharedCache || c.disableCache || options.DisableCache || len(message.Question) != 1 {
+		return nil
+	}
+	key := c.newCacheKey(nil, message.Question[0], message, options)
+	response, ttl, stale := c.loadResponse(key)
+	if response == nil || stale {
+		return nil
+	}
+	response.Id = message.Id
+	logCachedResponse(c.logger, ctx, response, ttl)
+	return response
 }
 
 func (c *Client) finishCacheKey(transport adapter.DNSTransport, key dnsCacheKey) (dnsCacheKey, bool) {
+	if c.legacySharedCache && transport.Type() != C.DNSTypeFakeIP {
+		return key, true
+	}
 	environment := c.environmentHash(transport)
 	if environment == key.environment || key.environment == 0 {
 		key.environment = environment
@@ -456,6 +482,9 @@ func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, dom
 		strategy = options.LookupStrategy
 	} else {
 		strategy = options.Strategy
+	}
+	if legacy, ok := transport.(*legacyFakeIPAlias); ok && responseChecker == nil {
+		return legacy.lookupLegacy(domain, strategy)
 	}
 	lookupOptions := options
 	if options.LookupStrategy != C.DomainStrategyAsIS {
