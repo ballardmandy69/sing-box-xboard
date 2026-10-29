@@ -1,0 +1,11 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": { "servers": [{ "type": "local", "tag": "local-dns" }] },
+  "inbounds": [],
+  "outbounds": [{ "type": "direct", "tag": "direct" }],
+  "route": {
+    "default_domain_resolver": "local-dns",
+    "final": "direct",
+    "rules": [{ "network": "udp", "action": "reject" }]
+  }
+}

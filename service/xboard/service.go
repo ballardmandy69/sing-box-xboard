@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -56,6 +57,8 @@ type node struct {
 	users         map[string]int64
 	userETag      string
 	configETag    string
+	auto          *autoInbound
+	autoOptions   option.XBoardAutoInboundOptions
 }
 
 type panelUser struct {
@@ -121,21 +124,15 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		client:  &http.Client{Timeout: timeout},
 	}
 	for key, inboundTag := range serverEntries {
-		inbound, loaded := inboundManager.Get(inboundTag)
-		if !loaded {
-			return nil, E.New("xboard inbound ", inboundTag, " not found")
-		}
-		managed, ok := inbound.(adapter.ManagedSSMServer)
-		if !ok {
-			return nil, E.New("inbound/", inbound.Type(), "[", inbound.Tag(), "] is not managed")
+		if err := checkInboundOwnership(ctx, s, inboundTag); err != nil {
+			return nil, err
 		}
 		nodeType := options.NodeType
 		if nodeType == "" && key != "default" {
 			nodeType = key
 		}
-		s.nodes = append(s.nodes, &node{
+		node := &node{
 			service:       s,
-			inbound:       managed,
 			traffic:       ssmapi.NewTrafficManager(),
 			apiHost:       strings.TrimRight(options.APIHost, "/"),
 			apiKey:        options.APIKey,
@@ -145,16 +142,54 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			pushInterval:  pushInterval,
 			disableUpload: options.DisableUploadTraffic,
 			users:         make(map[string]int64),
-		})
-		node := s.nodes[len(s.nodes)-1]
+		}
+		inbound, loaded := inboundManager.Get(inboundTag)
+		if _, owned := inbound.(*autoInbound); loaded && owned {
+			return nil, E.New("xboard inbound ", inboundTag, " already belongs to another panel node")
+		}
+		if !loaded {
+			if options.AutoInbound == nil {
+				return nil, E.New("xboard inbound ", inboundTag, " not found")
+			}
+			var err error
+			inbound, err = node.createInbound(ctx, inboundManager, inboundTag, *options.AutoInbound)
+			if err != nil {
+				return nil, E.Cause(err, "create xboard inbound ", inboundTag)
+			}
+		}
+		managed, ok := inbound.(adapter.ManagedSSMServer)
+		if !ok {
+			return nil, E.New("inbound/", inbound.Type(), "[", inbound.Tag(), "] is not managed")
+		}
+		node.inbound = managed
 		trafficFactor := options.TrafficFactor
 		if trafficFactor <= 0 {
 			trafficFactor = 1
 		}
 		node.trafficFactor = trafficFactor
 		managed.SetTracker(node.traffic)
+		s.nodes = append(s.nodes, node)
 	}
 	return s, nil
+}
+
+func checkInboundOwnership(ctx context.Context, current *Service, tag string) error {
+	services := []adapter.Service{current}
+	if manager := service.FromContext[adapter.ServiceManager](ctx); manager != nil {
+		services = append(services, manager.Services()...)
+	}
+	for _, candidate := range services {
+		owner, ok := candidate.(*Service)
+		if !ok {
+			continue
+		}
+		for _, node := range owner.nodes {
+			if node.inbound != nil && node.inbound.Tag() == tag {
+				return E.New("xboard inbound ", tag, " is already managed by another panel node")
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
@@ -184,8 +219,15 @@ func (n *node) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-pullTicker.C:
+			previousPull, previousPush := n.pullInterval, n.pushInterval
 			if err := n.syncUsers(ctx); err != nil {
 				n.service.logger.Error("xboard user sync: ", err)
+			}
+			if n.pullInterval != previousPull {
+				pullTicker.Reset(n.pullInterval)
+			}
+			if n.pushInterval != previousPush {
+				pushTicker.Reset(n.pushInterval)
 			}
 		case <-pushTicker.C:
 			if err := n.pushTraffic(ctx); err != nil {
@@ -196,23 +238,37 @@ func (n *node) loop(ctx context.Context) {
 }
 
 func (n *node) syncUsers(ctx context.Context) error {
+	// A rejected listener configuration must not postpone user revocation.
+	configErr := n.syncConfig(ctx)
+	return errors.Join(configErr, n.syncUserList(ctx))
+}
+
+func (n *node) syncConfig(ctx context.Context) error {
 	config, status, etag, err := n.request(ctx, http.MethodGet, "config", n.configETag, nil)
 	if err != nil {
 		return err
 	}
 	if status == http.StatusOK {
-		var response configResponse
+		var response autoConfigResponse
 		if err = json.Unmarshal(config, &response); err != nil {
-			return E.Cause(err, "decode xboard config")
+			return E.New("invalid xboard node configuration response")
 		}
-		if response.BaseConfig.PullInterval > 0 {
-			n.pullInterval = time.Duration(response.BaseConfig.PullInterval) * time.Second
+		if n.auto != nil {
+			candidate, err := response.buildInboundConfig(n.nodeType, n.autoOptions)
+			if err != nil {
+				return E.Cause(err, "xboard configuration rejected; previous inbound retained")
+			}
+			if err = n.auto.replace(candidate); err != nil {
+				return E.Cause(err, "xboard configuration update failed")
+			}
 		}
-		if response.BaseConfig.PushInterval > 0 {
-			n.pushInterval = time.Duration(response.BaseConfig.PushInterval) * time.Second
-		}
+		n.applyConfigIntervals(response.configResponse)
 		n.configETag = etag
 	}
+	return nil
+}
+
+func (n *node) syncUserList(ctx context.Context) error {
 	body, status, etag, err := n.request(ctx, http.MethodGet, "user", n.userETag, nil)
 	if err != nil {
 		return err
@@ -245,6 +301,15 @@ func (n *node) syncUsers(ctx context.Context) error {
 	n.access.Unlock()
 	n.service.logger.Info("xboard users synchronized: ", len(names), " node=", n.nodeID, " type=", n.nodeType)
 	return nil
+}
+
+func (n *node) applyConfigIntervals(response configResponse) {
+	if response.BaseConfig.PullInterval > 0 {
+		n.pullInterval = time.Duration(response.BaseConfig.PullInterval) * time.Second
+	}
+	if response.BaseConfig.PushInterval > 0 {
+		n.pushInterval = time.Duration(response.BaseConfig.PushInterval) * time.Second
+	}
 }
 
 func (n *node) pushTraffic(ctx context.Context) error {
@@ -298,7 +363,7 @@ func (n *node) pushTraffic(ctx context.Context) error {
 func (n *node) request(ctx context.Context, method string, endpoint string, etag string, body []byte) ([]byte, int, string, error) {
 	requestURL, err := url.Parse(n.apiHost + "/api/v1/server/UniProxy/" + endpoint)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", fmt.Errorf("invalid xboard %s request URL", endpoint)
 	}
 	query := requestURL.Query()
 	query.Set("token", n.apiKey)
@@ -313,7 +378,7 @@ func (n *node) request(ctx context.Context, method string, endpoint string, etag
 	}
 	request, err := http.NewRequestWithContext(ctx, method, requestURL.String(), reader)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", fmt.Errorf("invalid xboard %s request", endpoint)
 	}
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -324,15 +389,25 @@ func (n *node) request(ctx context.Context, method string, endpoint string, etag
 	}
 	response, err := n.service.client.Do(request)
 	if err != nil {
-		return nil, 0, "", err
+		if ctx.Err() != nil {
+			return nil, 0, "", fmt.Errorf("xboard %s request: %w", endpoint, ctx.Err())
+		}
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			return nil, 0, "", fmt.Errorf("xboard %s request timed out", endpoint)
+		}
+		return nil, 0, "", fmt.Errorf("xboard %s request failed", endpoint)
 	}
 	defer response.Body.Close()
-	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<20))
-	if readErr != nil {
-		return nil, response.StatusCode, "", readErr
-	}
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotModified {
-		return nil, response.StatusCode, "", errors.New(strings.TrimSpace(string(responseBody)))
+		return nil, response.StatusCode, "", fmt.Errorf("xboard %s HTTP status: %d", endpoint, response.StatusCode)
+	}
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
+	if readErr != nil {
+		return nil, response.StatusCode, "", fmt.Errorf("read xboard %s response failed", endpoint)
+	}
+	if len(responseBody) > 16<<20 {
+		return nil, response.StatusCode, "", fmt.Errorf("xboard %s response exceeds size limit", endpoint)
 	}
 	return responseBody, response.StatusCode, response.Header.Get("ETag"), nil
 }

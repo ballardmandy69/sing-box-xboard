@@ -26,6 +26,22 @@ type XBoardServiceOptions struct {
 	Timeout              badoption.Duration                `json:"timeout,omitempty"`
 	DisableUploadTraffic bool                              `json:"disable_upload_traffic,omitempty"`
 	TrafficFactor        float64                           `json:"traffic_factor,omitempty"`
+	AutoInbound          *XBoardAutoInboundOptions         `json:"auto_inbound,omitempty"`
+}
+
+// XBoardAutoInboundOptions fills local settings absent from the panel node configuration.
+// @author lyt
+// @date 2026-10-29
+type XBoardAutoInboundOptions struct {
+	Protocol        string `json:"protocol,omitempty"`
+	Listen          string `json:"listen,omitempty"`
+	ListenPort      int    `json:"listen_port,omitempty"`
+	ProxyProtocol   bool   `json:"proxy_protocol,omitempty"`
+	AutoOutIP       bool   `json:"auto_out_ip,omitempty"`
+	CertificatePath string `json:"certificate_path,omitempty"`
+	KeyPath         string `json:"key_path,omitempty"`
+	PrivateKey      string `json:"private_key,omitempty"`
+	PrivateKeyPath  string `json:"private_key_path,omitempty"`
 }
 
 type ServiceOptionsRegistry interface {

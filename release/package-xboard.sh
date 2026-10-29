@@ -21,8 +21,8 @@ STAGE="$(mktemp -d "$OUTPUT_DIR/.package.XXXXXXXX")"
 trap 'rm -rf -- "$STAGE"' EXIT
 
 install -m 0755 -- "$BINARY" "$STAGE/sing-box"
-for name in config.anytls-native.json server.anytls-native.yml config.anytls.json server.anytls.yml \
-  config.trojan.json server.trojan.yml; do
+for name in config.xboard.json server.xboard.yml config.anytls-native.json server.anytls-native.yml \
+  config.anytls.json server.anytls.yml config.trojan.json server.trojan.yml; do
   install -m 0644 -- "$ROOT/$name" "$STAGE/$name"
 done
 for name in install.sh sb-auto.sh; do
@@ -35,7 +35,8 @@ install -m 0644 -- "$ROOT/third_party/sing-anytls/LICENSE" "$STAGE/ANYTLS-LICENS
 
 ASSET="sing-box-xboard-${ARCH}.tar.gz"
 tar -czf "$OUTPUT_DIR/$ASSET" -C "$STAGE" \
-  sing-box config.anytls-native.json server.anytls-native.yml config.anytls.json server.anytls.yml \
+  sing-box config.xboard.json server.xboard.yml config.anytls-native.json server.anytls-native.yml \
+  config.anytls.json server.anytls.yml \
   config.trojan.json server.trojan.yml install.sh sb-auto.sh \
   USAGE.md anytls-native.md LICENSE ANYTLS-LICENSE
 (cd -- "$OUTPUT_DIR" && sha256sum "$ASSET" > "SHA256SUMS-${ARCH}.txt")

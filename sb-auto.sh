@@ -50,7 +50,7 @@ for extension in json yml; do
 done
 download "${SHARE%/}/$JSON_NAME" "$TMP_DIR/$INSTANCE.json"
 download "${SHARE%/}/$YAML_NAME" "$TMP_DIR/$INSTANCE.yml"
-(cd "$INSTALL_DIR" && ./sing-box check -c "$TMP_DIR/$INSTANCE.json" -c "$TMP_DIR/$INSTANCE.yml") ||
+(cd "$INSTALL_DIR" && ./sing-box check -c "$TMP_DIR/$INSTANCE.json" -s "$TMP_DIR/$INSTANCE.yml") ||
   error "downloaded configuration check failed; existing files were preserved"
 
 unit="${SERVICE_PREFIX}sbc@${INSTANCE}.service"

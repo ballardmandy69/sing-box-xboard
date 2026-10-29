@@ -3,6 +3,7 @@ DisableAccessLog: false
 
 Nodes:
   - Type: UniProxy
+    StaticInbound: true
     UpdateInterval: "60s"
     ApiConfig:
       PanelTag: "trojan-1"

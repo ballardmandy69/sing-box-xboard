@@ -1,0 +1,4 @@
+# 在 Nodes 中添加节点；协议与监听端口由节点配置/面板决定。
+# 证书、ListenIP、AutoOutIP 等配置示例见 USAGE.md。
+DisableAccessLog: false
+Nodes: []

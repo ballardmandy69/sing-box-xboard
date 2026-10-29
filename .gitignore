@@ -4,6 +4,7 @@
 !/config.anytls-native.json
 !/config.anytls.json
 !/config.trojan.json
+!/config.xboard.json
 /*.srs
 /*.db
 /site/

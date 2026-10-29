@@ -79,6 +79,7 @@ type InboundOptions struct {
 type ListenOptions struct {
 	Listen               *badoption.Addr    `json:"listen,omitempty"`
 	ListenPort           uint16             `json:"listen_port,omitempty"`
+	AutoOutIP            bool               `json:"auto_out_ip,omitempty"`
 	BindInterface        string             `json:"bind_interface,omitempty"`
 	RoutingMark          FwMark             `json:"routing_mark,omitempty"`
 	ReuseAddr            bool               `json:"reuse_addr,omitempty"`
@@ -93,9 +94,9 @@ type ListenOptions struct {
 	UDPTimeout           UDPTimeoutCompat   `json:"udp_timeout,omitempty"`
 	Detour               string             `json:"detour,omitempty" reference:"inbound"`
 
-	// Deprecated: removed
+	// ProxyProtocol requires a valid PROXY protocol v1 or v2 header on TCP connections.
 	ProxyProtocol bool `json:"proxy_protocol,omitempty" schema:"omit"`
-	// Deprecated: removed
+	// ProxyProtocolAcceptNoHeader also accepts ordinary TCP connections without a PROXY header.
 	ProxyProtocolAcceptNoHeader bool `json:"proxy_protocol_accept_no_header,omitempty" schema:"omit"`
 	// Legacy inbound fields are rejected since sing-box 1.13.0.
 	//nolint:staticcheck

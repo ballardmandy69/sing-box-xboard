@@ -17,6 +17,7 @@ type Manager struct {
 	access       sync.Mutex
 	inbounds     []adapter.Inbound
 	inboundByTag map[string]adapter.Inbound
+	started      bool
 }
 
 func NewManager(registry adapter.InboundRegistry, endpoint adapter.EndpointManager) *Manager {
@@ -29,7 +30,8 @@ func NewManager(registry adapter.InboundRegistry, endpoint adapter.EndpointManag
 
 func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	m.access.Lock()
-	inbounds := m.inbounds
+	m.started = true
+	inbounds := append([]adapter.Inbound(nil), m.inbounds...)
 	m.access.Unlock()
 	for _, inbound := range inbounds {
 		name := "inbound/" + inbound.Type() + "[" + inbound.Tag() + "]"
@@ -44,7 +46,7 @@ func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 func (m *Manager) Inbounds() []adapter.Inbound {
 	m.access.Lock()
 	defer m.access.Unlock()
-	return m.inbounds
+	return append([]adapter.Inbound(nil), m.inbounds...)
 }
 
 func (m *Manager) Get(tag string) (adapter.Inbound, bool) {
@@ -62,8 +64,22 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
 	if err != nil {
 		return err
 	}
+	return m.Register(inbound)
+}
+
+// Register attaches a preconstructed inbound before the manager's lifecycle starts.
+// @author lyt
+// @date 2026-10-29
+func (m *Manager) Register(inbound adapter.Inbound) error {
+	if inbound == nil {
+		return E.New("cannot register a nil inbound")
+	}
 	m.access.Lock()
 	defer m.access.Unlock()
+	if m.started {
+		return E.New("cannot register an inbound after the manager starts")
+	}
+	tag := inbound.Tag()
 	_, loaded := m.inboundByTag[tag]
 	if loaded {
 		return E.New("duplicate inbound tag: ", tag)

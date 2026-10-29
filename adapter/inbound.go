@@ -40,6 +40,7 @@ type InboundManager interface {
 	Lifecycle
 	Inbounds() []Inbound
 	Get(tag string) (Inbound, bool)
+	Register(inbound Inbound) error
 	Create(ctx context.Context, router Router, logger log.ContextLogger, tag string, inboundType string, options any) error
 }
 

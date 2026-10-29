@@ -20,6 +20,7 @@ import (
 var (
 	globalCtx         context.Context
 	configPaths       []string
+	serverConfigPaths []string
 	configDirectories []string
 	workingDir        string
 	disableColor      bool
@@ -32,6 +33,9 @@ var mainCommand = &cobra.Command{
 
 func init() {
 	mainCommand.PersistentFlags().StringArrayVarP(&configPaths, "config", "c", nil, "set configuration file path")
+	mainCommand.PersistentFlags().StringArrayVarP(
+		&serverConfigPaths, "server-config", "s", nil, "set panel configuration file path",
+	)
 	mainCommand.PersistentFlags().StringArrayVarP(&configDirectories, "config-directory", "C", nil, "set configuration directory path")
 	mainCommand.PersistentFlags().StringVarP(&workingDir, "directory", "D", "", "set working directory")
 	mainCommand.PersistentFlags().BoolVarP(&disableColor, "disable-color", "", false, "disable color output")

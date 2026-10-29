@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sagernet/sing-box/include"
@@ -39,6 +40,118 @@ func TestNormalizeLegacyServerConfig(t *testing.T) {
 	}
 	if result["log"].(map[string]any)["disabled"] != true {
 		t.Fatal("DisableAccessLog was not mapped")
+	}
+}
+
+// TestLegacyAutomaticNodes exercises the nyafw-shaped YAML without exposing real panel credentials.
+// @author lyt
+// @date 2026-10-29
+func TestLegacyAutomaticNodes(t *testing.T) {
+	previousContext := globalCtx
+	globalCtx = include.Context(context.Background())
+	t.Cleanup(func() { globalCtx = previousContext })
+	content := []byte(`DisableAccessLog: false
+Nodes:
+  - Type: UniProxy
+    ListenIP: 192.0.2.10
+    ListenPort: 443
+    AutoOutIP: true
+    ProxyProtocol: true
+    ApiConfig:
+      PanelTag: anytls-a
+      ApiHost: https://panel.example.com
+      ApiKey: test-token
+      NodeType: Anytls
+      NodeID: 171
+    CertConfig:
+      CertFile: ./z.crt
+      KeyFile: ./z.key
+  - Type: UniProxy
+    ListenIP: 192.0.2.11
+    AutoOutIP: true
+    ApiConfig:
+      PanelTag: trojan-b
+      ApiHost: https://panel.example.com
+      ApiKey: test-token
+      NodeType: Trojan
+      NodeID: 10
+    CertConfig:
+      CertFile: ./zq.crt
+      KeyFile: ./zq.key
+  - Type: UniProxy
+    Protocol: anytls-native
+    PrivateKeyPath: ./native.key
+    ApiConfig:
+      PanelTag: native-c
+      ApiHost: https://panel.example.com
+      ApiKey: test-token
+      NodeType: Anytls
+      NodeID: 172
+`)
+	path := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := readConfigAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.options.Inbounds) != 0 || len(entry.options.Services) != 3 {
+		t.Fatal("legacy Nodes must create panel services with automatic inbound settings")
+	}
+	a := entry.options.Services[0].Options.(*option.XBoardServiceOptions)
+	b := entry.options.Services[1].Options.(*option.XBoardServiceOptions)
+	c := entry.options.Services[2].Options.(*option.XBoardServiceOptions)
+	if a.NodeType != "anytls" || a.NodeID != 171 || a.AutoInbound.Listen != "192.0.2.10" ||
+		a.AutoInbound.ListenPort != 443 || !a.AutoInbound.AutoOutIP || !a.AutoInbound.ProxyProtocol ||
+		a.AutoInbound.CertificatePath != "./z.crt" || a.AutoInbound.KeyPath != "./z.key" {
+		t.Fatal("AnyTLS listener, proxy, egress or certificate settings were lost")
+	}
+	if b.NodeType != "trojan" || b.AutoInbound.Listen != "192.0.2.11" ||
+		b.AutoInbound.ListenPort != 0 || !b.AutoInbound.AutoOutIP || b.AutoInbound.ProxyProtocol {
+		t.Fatal("Trojan node must retain independent settings and default to the panel port")
+	}
+	if c.NodeType != "anytls" || c.AutoInbound.Protocol != "anytls-native" ||
+		c.AutoInbound.PrivateKeyPath != "./native.key" {
+		t.Fatal("native protocol selection must preserve the panel's API node type")
+	}
+}
+
+func TestLegacyStaticInbound(t *testing.T) {
+	value := map[string]any{"Nodes": []any{map[string]any{
+		"StaticInbound": true,
+		"ApiConfig":     map[string]any{"PanelTag": "manual", "NodeType": "AnyTLS"},
+	}}}
+	result := normalizeLegacyServerConfig(value).(map[string]any)
+	service := result["services"].([]any)[0].(map[string]any)
+	if _, exists := service["auto_inbound"]; exists {
+		t.Fatal("StaticInbound must require an existing manually configured inbound")
+	}
+}
+
+func TestLegacyNodeValidation(t *testing.T) {
+	for _, test := range []struct {
+		name, input, want string
+	}{
+		{"not-array", "Nodes: {}", "Nodes must be an array"},
+		{"not-object", "Nodes: [invalid]", "Nodes[0] must be an object"},
+		{"missing-api", "Nodes: [{}]", "ApiConfig must be an object"},
+		{"unknown-type", "Nodes: [{Type: Unknown, ApiConfig: {}}]", "Type must be UniProxy"},
+		{"invalid-port", "Nodes: [{ListenPort: 65536, ApiConfig: {}}]", "ListenPort must be"},
+		{"fractional-port", "Nodes: [{ListenPort: 443.5, ApiConfig: {}}]", "ListenPort must be"},
+		{"invalid-proxy", "Nodes: [{ProxyProtocol: 'true', ApiConfig: {}}]", "ProxyProtocol must be a boolean"},
+		{"invalid-egress", "Nodes: [{AutoOutIP: yes, ApiConfig: {}}]", "AutoOutIP must be a boolean"},
+		{"duplicate-tag", "Nodes: [{ApiConfig: {PanelTag: a}}, {ApiConfig: {PanelTag: a}}]", "PanelTag must be unique"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeConfigContent("server.yml", []byte(test.input))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("got %v, want %s", err, test.want)
+			}
+		})
+	}
+	if _, err := decodeConfigContent("server.yml", []byte("Nodes: []")); err != nil {
+		t.Fatalf("empty generic installation config must be valid: %v", err)
 	}
 }
 

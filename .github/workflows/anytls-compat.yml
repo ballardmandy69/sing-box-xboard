@@ -11,6 +11,16 @@ on:
       - 'protocol/anytlsnative/**'
       - 'transport/anytlsnative/**'
       - 'cmd/sing-box/**'
+      - 'service/xboard/**'
+      - 'adapter/inbound*'
+      - 'adapter/inbound/**'
+      - 'adapter/outbound_bind.go'
+      - 'common/listener/**'
+      - 'common/dialer/**'
+      - 'option/inbound.go'
+      - 'option/service.go'
+      - 'config.xboard.json'
+      - 'server.xboard.yml'
       - 'option/anytls_native.go'
       - 'install.sh'
       - 'sb-auto.sh'
@@ -34,6 +44,16 @@ on:
       - 'protocol/anytlsnative/**'
       - 'transport/anytlsnative/**'
       - 'cmd/sing-box/**'
+      - 'service/xboard/**'
+      - 'adapter/inbound*'
+      - 'adapter/inbound/**'
+      - 'adapter/outbound_bind.go'
+      - 'common/listener/**'
+      - 'common/dialer/**'
+      - 'option/inbound.go'
+      - 'option/service.go'
+      - 'config.xboard.json'
+      - 'server.xboard.yml'
       - 'option/anytls_native.go'
       - 'install.sh'
       - 'sb-auto.sh'
@@ -71,6 +91,7 @@ jobs:
         run: >-
           go test -race ./transport/anytlsnative ./protocol/anytlsnative
           ./transport/trojan ./protocol/trojan ./protocol/anytls ./service/xboard
+          ./adapter/inbound ./common/listener ./common/dialer
       - name: Build client and server
         run: go build -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
       - name: Install and update deployment

@@ -59,6 +59,37 @@ func normalizeLegacyServerConfig(value any) any {
 			"tag":     panelTag,
 			"inbound": panelTag,
 		}
+		autoInbound := map[string]any{}
+		if protocol := legacyString(node["Protocol"]); protocol != "" {
+			autoInbound["protocol"] = strings.ToLower(protocol)
+		}
+		if listen := legacyString(node["ListenIP"]); listen != "" {
+			autoInbound["listen"] = listen
+		}
+		if port, ok := legacyInteger(node["ListenPort"]); ok {
+			autoInbound["listen_port"] = port
+		}
+		for legacyKey, field := range map[string]string{
+			"ProxyProtocol": "proxy_protocol", "AutoOutIP": "auto_out_ip",
+		} {
+			if enabled, ok := node[legacyKey].(bool); ok {
+				autoInbound[field] = enabled
+			}
+		}
+		certConfig, _ := node["CertConfig"].(map[string]any)
+		for legacyKey, field := range map[string]string{"CertFile": "certificate_path", "KeyFile": "key_path"} {
+			if path := legacyString(certConfig[legacyKey]); path != "" {
+				autoInbound[field] = path
+			}
+		}
+		for legacyKey, field := range map[string]string{"PrivateKey": "private_key", "PrivateKeyPath": "private_key_path"} {
+			if key := legacyString(node[legacyKey]); key != "" {
+				autoInbound[field] = key
+			}
+		}
+		if static, _ := node["StaticInbound"].(bool); !static {
+			service["auto_inbound"] = autoInbound
+		}
 		if host := legacyString(apiConfig["ApiHost"]); host != "" {
 			service["api_host"] = host
 		}
@@ -103,6 +134,60 @@ func normalizeLegacyServerConfig(value any) any {
 		delete(root, key)
 	}
 	return root
+}
+
+// validateLegacyNodes rejects malformed node declarations before conversion can discard their values.
+// @author lyt
+// @date 2026-10-29
+func validateLegacyNodes(value any) error {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	rawNodes, exists := root["Nodes"]
+	if !exists {
+		return nil
+	}
+	nodes, ok := rawNodes.([]any)
+	if !ok {
+		return fmt.Errorf("Nodes must be an array; use Nodes: [] for no panel nodes")
+	}
+	tags := make(map[string]bool, len(nodes))
+	for index, rawNode := range nodes {
+		node, ok := rawNode.(map[string]any)
+		if !ok {
+			return fmt.Errorf("Nodes[%d] must be an object", index)
+		}
+		if nodeType := legacyString(node["Type"]); nodeType != "" && !strings.EqualFold(nodeType, "UniProxy") {
+			return fmt.Errorf("Nodes[%d].Type must be UniProxy", index)
+		}
+		api, ok := node["ApiConfig"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("Nodes[%d].ApiConfig must be an object", index)
+		}
+		tag := legacyString(api["PanelTag"])
+		if tag == "" {
+			tag = "xboard-" + strconv.Itoa(index)
+		}
+		if tags[tag] {
+			return fmt.Errorf("Nodes[%d].ApiConfig.PanelTag must be unique", index)
+		}
+		tags[tag] = true
+		if value, exists := node["ListenPort"]; exists {
+			port, ok := legacyInteger(value)
+			if !ok || port < 0 || port > 65535 {
+				return fmt.Errorf("Nodes[%d].ListenPort must be an integer between 0 and 65535", index)
+			}
+		}
+		for _, field := range []string{"AutoOutIP", "ProxyProtocol", "StaticInbound"} {
+			if value, exists := node[field]; exists {
+				if _, ok := value.(bool); !ok {
+					return fmt.Errorf("Nodes[%d].%s must be a boolean", index, field)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func legacyString(value any) string {

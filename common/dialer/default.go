@@ -273,6 +273,9 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 	} else if address.IsDomain() {
 		return nil, E.New("domain not resolved")
 	}
+	if source := adapter.OutboundBindAddressFrom(ctx); source.IsValid() {
+		return d.dialBoundContext(ctx, network, address, source)
+	}
 	if d.networkStrategy == nil {
 		conn, err := listener.ListenNetworkNamespace[net.Conn](ctx, d.netns, func() (net.Conn, error) {
 			switch N.NetworkName(network) {
@@ -296,6 +299,9 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 }
 
 func (d *DefaultDialer) DialParallelInterface(ctx context.Context, network string, address M.Socksaddr, strategy *C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
+	if adapter.OutboundBindAddressFrom(ctx).IsValid() {
+		return d.DialContext(ctx, network, address)
+	}
 	if strategy == nil {
 		strategy = d.networkStrategy
 	}
@@ -344,6 +350,9 @@ func (d *DefaultDialer) DialParallelInterface(ctx context.Context, network strin
 }
 
 func (d *DefaultDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	if adapter.OutboundBindAddressFrom(ctx).IsValid() {
+		return nil, E.New("AutoOutIP only supports TCP")
+	}
 	if d.networkStrategy == nil {
 		packetConn, err := listener.ListenNetworkNamespace[net.PacketConn](ctx, d.netns, func() (net.PacketConn, error) {
 			listenConfig := d.udpListener

@@ -12,7 +12,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   exit 1
 }
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf -- "$TMP_DIR"' EXIT
+panel_pid=''
+cleanup() {
+  if [ -n "$panel_pid" ]; then
+    kill "$panel_pid" 2>/dev/null || true
+    wait "$panel_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$TMP_DIR"
+}
+trap cleanup EXIT
 mkdir "$TMP_DIR/shims" "$TMP_DIR/package" "$TMP_DIR/release" "$TMP_DIR/share"
 export SMOKE_LOG="$TMP_DIR/systemctl.log"
 export SMOKE_SHARE="$TMP_DIR/share"
@@ -64,7 +72,7 @@ expect_failure() {
 }
 run_installer() {
   env INSTALL_DIR="$TMP_DIR/install" SYSTEMD_DIR="$TMP_DIR/units" ARCH=amd64 \
-    INSTANCE=server SERVICE_PREFIX=xboard- PROTOCOL=anytls-native RELEASE_DIR="$TMP_DIR/release" \
+    INSTANCE=server SERVICE_PREFIX=xboard- RELEASE_DIR="$TMP_DIR/release" \
     bash "$ROOT/install.sh" > "$TMP_DIR/install.log" 2>&1
 }
 run_auto() {
@@ -80,12 +88,17 @@ tar -xzf "$TMP_DIR/release/sing-box-xboard-amd64.tar.gz" -C "$TMP_DIR/package"
 
 run_installer || { cat "$TMP_DIR/install.log" >&2; fail "fresh install"; }
 [ -x "$TMP_DIR/install/sing-box" ] || fail "missing installed core"
-[ -s "$TMP_DIR/install/server-public-key.txt" ] || fail "missing public key"
-! grep -q '__SERVER_PRIVATE_KEY__' "$TMP_DIR/install/config.json" || fail "unreplaced private key"
+[ ! -e "$TMP_DIR/install/server-public-key.txt" ] || fail "installer generated an unsolicited key pair"
+cmp "$ROOT/config.xboard.json" "$TMP_DIR/install/config.json" || fail "generic JSON template changed"
+cmp "$ROOT/server.xboard.yml" "$TMP_DIR/install/server.yml" || fail "generic YAML template changed"
+grep -Eq '"inbounds"[[:space:]]*:[[:space:]]*\[\]' "$TMP_DIR/install/config.json" || fail "unexpected default listener"
+grep -Eq '^Nodes:[[:space:]]*\[\]' "$TMP_DIR/install/server.yml" || fail "default Nodes must be empty"
 [ "$(stat -c %a "$TMP_DIR/install/config.json")" = 600 ] || fail "config permissions"
 [ "$(stat -c %a "$TMP_DIR/install/server.yml")" = 600 ] || fail "YAML permissions"
 [ -s "$TMP_DIR/units/xboard-sb@.service" ] && [ -s "$TMP_DIR/units/xboard-sbc@.service" ] || fail "missing units"
-for protocol in anytls-native anytls trojan; do
+grep -Fq -- "-s $TMP_DIR/install/%i.yml" "$TMP_DIR/units/xboard-sb@.service" || fail "shared unit lacks YAML alias"
+grep -Fq -- "-s $TMP_DIR/install/%i.yml" "$TMP_DIR/units/xboard-sbc@.service" || fail "independent unit lacks YAML alias"
+for protocol in xboard anytls-native anytls trojan; do
   for name in "config.$protocol.json" "server.$protocol.yml"; do
     [ "$(stat -c %a "$TMP_DIR/install/examples/$name")" = 644 ] || fail "missing protected example $name"
   done
@@ -93,17 +106,22 @@ done
 grep -q '__SERVER_PRIVATE_KEY__' "$TMP_DIR/install/examples/config.anytls-native.json" ||
   fail "example contains generated private key"
 ! grep -Eq '^(enable|restart|start) ' "$SMOKE_LOG" || fail "installer started a service"
-pass 'fresh install generates protected native config and both service templates'
+pass 'fresh install uses empty Nodes and no listeners or keys, without starting services or contacting a panel'
+
+printf 'log:\n  level: warn\n' > "$TMP_DIR/extra.yml"
+"$TMP_DIR/install/sing-box" check -c "$TMP_DIR/install/config.json" \
+  -s "$TMP_DIR/install/server.yml" -s "$TMP_DIR/extra.yml" || fail "repeated -s CLI validation"
+"$TMP_DIR/install/sing-box" check -c "$TMP_DIR/install/config.json" \
+  --server-config "$TMP_DIR/install/server.yml" || fail "long server-config CLI alias"
+pass 'real CLI accepts repeated -s and --server-config panel configuration flags'
 
 printf '\n# operator setting retained\n' >> "$TMP_DIR/install/server.yml"
 cp "$TMP_DIR/install/config.json" "$TMP_DIR/original.json"
 cp "$TMP_DIR/install/server.yml" "$TMP_DIR/original.yml"
-cp "$TMP_DIR/install/server-public-key.txt" "$TMP_DIR/original.public"
 run_installer || { cat "$TMP_DIR/install.log" >&2; fail "upgrade"; }
-cmp "$TMP_DIR/original.json" "$TMP_DIR/install/config.json" || fail "upgrade changed private key or config"
+cmp "$TMP_DIR/original.json" "$TMP_DIR/install/config.json" || fail "upgrade changed config"
 cmp "$TMP_DIR/original.yml" "$TMP_DIR/install/server.yml" || fail "upgrade changed YAML"
-cmp "$TMP_DIR/original.public" "$TMP_DIR/install/server-public-key.txt" || fail "upgrade changed public key"
-pass 'upgrade preserves configuration and existing key pair'
+pass 'upgrade preserves generic configuration and operator edits'
 
 command -v openssl >/dev/null 2>&1 || fail "openssl is required for real TLS configuration tests"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
@@ -111,44 +129,131 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   > "$TMP_DIR/certificate.log" 2>&1
 sha256sum "$TMP_DIR/tls.crt" "$TMP_DIR/tls.key" > "$TMP_DIR/certificate-before.sha256"
 for protocol in anytls trojan; do
-  expect_failure env -u TLS_CERT_FILE -u TLS_KEY_FILE \
-    INSTALL_DIR="$TMP_DIR/no-cert-$protocol" SYSTEMD_DIR="$TMP_DIR/no-cert-units-$protocol" \
-    ARCH=amd64 INSTANCE=server PROTOCOL="$protocol" RELEASE_DIR="$TMP_DIR/release" bash "$ROOT/install.sh"
-  grep -q 'TLS_CERT_FILE' "$TMP_DIR/expected-failure.log" || fail "$protocol did not require TLS certificate"
-  [ ! -e "$TMP_DIR/no-cert-$protocol" ] || fail "missing TLS certificate modified target"
-  env INSTALL_DIR="$TMP_DIR/$protocol" SYSTEMD_DIR="$TMP_DIR/units-$protocol" \
-    ARCH=amd64 INSTANCE=server PROTOCOL="$protocol" RELEASE_DIR="$TMP_DIR/release" \
-    TLS_CERT_FILE="$TMP_DIR/tls.crt" TLS_KEY_FILE="$TMP_DIR/tls.key" \
-    bash "$ROOT/install.sh" > "$TMP_DIR/$protocol.log" 2>&1 || {
-      cat "$TMP_DIR/$protocol.log" >&2
-      fail "$protocol fresh install"
-    }
-  grep -Eq '"type"[[:space:]]*:[[:space:]]*"'"$protocol"'"' "$TMP_DIR/$protocol/config.json" ||
-    fail "$protocol template selection"
-  grep -Fq "$TMP_DIR/tls.crt" "$TMP_DIR/$protocol/config.json" || fail "$protocol certificate path not substituted"
-  grep -Fq "$TMP_DIR/tls.key" "$TMP_DIR/$protocol/config.json" || fail "$protocol key path not substituted"
-  [ ! -e "$TMP_DIR/$protocol/server-public-key.txt" ] || fail "$protocol generated an unrelated native public key"
-  ! grep -q 'server_public_key' "$TMP_DIR/$protocol.log" || fail "$protocol displayed native key instructions"
-  "$TMP_DIR/$protocol/sing-box" check -c "$TMP_DIR/$protocol/config.json" -c "$TMP_DIR/$protocol/server.yml"
+  mkdir "$TMP_DIR/$protocol"
+  legacy_config="$(< "$ROOT/config.$protocol.json")"
+  legacy_config="${legacy_config//__TLS_CERT_FILE__/$TMP_DIR/tls.crt}"
+  legacy_config="${legacy_config//__TLS_KEY_FILE__/$TMP_DIR/tls.key}"
+  printf '%s\n' "$legacy_config" > "$TMP_DIR/$protocol/config.json"
+  unset legacy_config
+  cp "$ROOT/server.xboard.yml" "$TMP_DIR/$protocol/server.yml"
   cp "$TMP_DIR/$protocol/config.json" "$TMP_DIR/$protocol-before.json"
   cp "$TMP_DIR/$protocol/server.yml" "$TMP_DIR/$protocol-before.yml"
-  env -u TLS_CERT_FILE -u TLS_KEY_FILE \
-    INSTALL_DIR="$TMP_DIR/$protocol" SYSTEMD_DIR="$TMP_DIR/units-$protocol" \
-    ARCH=amd64 INSTANCE=server PROTOCOL=anytls-native RELEASE_DIR="$TMP_DIR/release" \
+  env INSTALL_DIR="$TMP_DIR/$protocol" SYSTEMD_DIR="$TMP_DIR/units-$protocol" \
+    ARCH=amd64 INSTANCE=server RELEASE_DIR="$TMP_DIR/release" \
     bash "$ROOT/install.sh" > "$TMP_DIR/$protocol-upgrade.log" 2>&1 ||
-    fail "$protocol upgrade without new TLS variables"
+    { cat "$TMP_DIR/$protocol-upgrade.log" >&2; fail "$protocol manual configuration upgrade"; }
   cmp "$TMP_DIR/$protocol-before.json" "$TMP_DIR/$protocol/config.json" || fail "$protocol upgrade changed JSON"
   cmp "$TMP_DIR/$protocol-before.yml" "$TMP_DIR/$protocol/server.yml" || fail "$protocol upgrade changed YAML"
   [ ! -e "$TMP_DIR/$protocol/server-public-key.txt" ] || fail "$protocol upgrade generated native public key"
-  pass "$protocol requires TLS, installs a real checked configuration and preserves it on upgrade"
+  "$TMP_DIR/$protocol/sing-box" check -c "$TMP_DIR/$protocol/config.json" -s "$TMP_DIR/$protocol/server.yml"
+  pass "upgrade preserves manually configured $protocol listeners and existing TLS material"
 done
 sha256sum -c "$TMP_DIR/certificate-before.sha256" > "$TMP_DIR/certificate-check.log" ||
   fail "installer altered TLS certificate or key"
 
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for the local panel fixture"
+cat > "$TMP_DIR/panel.py" <<'PYTHON'
+import http.server
+import json
+import sys
+import urllib.parse
+
+
+class Panel(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        if parsed.path != "/api/v1/server/UniProxy/config":
+            self.send_error(404)
+            return
+        if query.get("token") != ["installer-test-token"]:
+            self.send_error(401)
+            return
+        node_id = int(query["node_id"][0])
+        protocol = query["node_type"][0]
+        body = json.dumps({"protocol": protocol, "server_port": 24000 + node_id}).encode()
+        with open(sys.argv[1], "a", encoding="utf-8") as log:
+            log.write(f"{node_id} {protocol}\n")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Panel)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PYTHON
+coproc PANEL_PROCESS { exec python3 -u "$TMP_DIR/panel.py" "$TMP_DIR/panel-requests.log"; }
+panel_pid="$PANEL_PROCESS_PID"
+read -r -t 10 panel_port <&"${PANEL_PROCESS[0]}" || fail "local panel fixture did not start"
+key_pair="$("$SING_BOX_BINARY" generate anytls-native-keypair)"
+native_private_key="$(printf '%s\n' "$key_pair" | sed -n 's/^PrivateKey: //p')"
+unset key_pair
+combination_index=0
+for combination in anytls trojan native anytls,trojan anytls,native trojan,native \
+  anytls,trojan,native anytls,anytls,trojan,native; do
+  combination_index=$((combination_index + 1))
+  combination_dir="$TMP_DIR/combination-$combination_index"
+  mkdir "$combination_dir"
+  cp "$ROOT/config.xboard.json" "$combination_dir/config.json"
+  cp "$TMP_DIR/tls.crt" "$combination_dir/tls.crt"
+  cp "$TMP_DIR/tls.key" "$combination_dir/tls.key"
+  printf 'DisableAccessLog: false\nNodes:\n' > "$combination_dir/server.yml"
+  IFS=, read -r -a protocols <<< "$combination"
+  node_index=0
+  for protocol in "${protocols[@]}"; do
+    node_index=$((node_index + 1))
+    node_type="$protocol"
+    [ "$protocol" != native ] || node_type=anytls
+    cat >> "$combination_dir/server.yml" <<YAML
+  - Type: UniProxy
+    ApiConfig:
+      PanelTag: "$protocol-$node_index"
+      ApiHost: "http://127.0.0.1:$panel_port"
+      ApiKey: "installer-test-token"
+      NodeType: "$node_type"
+      NodeID: $node_index
+YAML
+    if [ "$protocol" = native ]; then
+      printf '%s\n' "$native_private_key" > "$combination_dir/native.key"
+      cat >> "$combination_dir/server.yml" <<'YAML'
+    Protocol: anytls-native
+    PrivateKeyPath: "./native.key"
+YAML
+    else
+      cat >> "$combination_dir/server.yml" <<'YAML'
+    CertConfig:
+      CertFile: "./tls.crt"
+      KeyFile: "./tls.key"
+YAML
+    fi
+  done
+  (cd "$combination_dir" && sha256sum config.json server.yml tls.crt tls.key > before.sha256)
+  if [ -f "$combination_dir/native.key" ]; then
+    (cd "$combination_dir" && sha256sum native.key >> before.sha256)
+  fi
+  env INSTALL_DIR="$combination_dir" SYSTEMD_DIR="$TMP_DIR/combination-units-$combination_index" \
+    ARCH=amd64 INSTANCE=server RELEASE_DIR="$TMP_DIR/release" \
+    bash "$ROOT/install.sh" > "$TMP_DIR/combination-$combination_index.log" 2>&1 || {
+      cat "$TMP_DIR/combination-$combination_index.log" >&2
+      fail "Nodes-driven protocol combination $combination"
+    }
+  (cd "$combination_dir" && sha256sum -c before.sha256) > "$TMP_DIR/combination-hashes.log" ||
+    fail "installation changed existing Nodes or key material for $combination"
+done
+unset native_private_key
+[ "$(wc -l < "$TMP_DIR/panel-requests.log")" -ge 16 ] || fail "node combinations did not query the local panel"
+pass 'all seven protocol combinations and repeated-protocol Nodes preserve configuration and key material'
+
 mkdir "$TMP_DIR/partial-config"
 cp "$TMP_DIR/install/config.json" "$TMP_DIR/partial-config/config.json"
 expect_failure env INSTALL_DIR="$TMP_DIR/partial-config" SYSTEMD_DIR="$TMP_DIR/partial-units" \
-  ARCH=amd64 INSTANCE=server PROTOCOL=trojan RELEASE_DIR="$TMP_DIR/release" bash "$ROOT/install.sh"
+  ARCH=amd64 INSTANCE=server RELEASE_DIR="$TMP_DIR/release" bash "$ROOT/install.sh"
 grep -q 'matching server.yml' "$TMP_DIR/expected-failure.log" || fail "missing paired YAML was not explained"
 cmp "$TMP_DIR/install/config.json" "$TMP_DIR/partial-config/config.json" || fail "partial pair changed JSON"
 [ ! -e "$TMP_DIR/partial-config/server.yml" ] && [ ! -e "$TMP_DIR/partial-config/sing-box" ] ||
@@ -178,7 +283,18 @@ tar -czf "$TMP_DIR/legacy/sing-box-xboard-amd64.tar.gz" -C "$TMP_DIR/package" si
 expect_failure env INSTALL_DIR="$TMP_DIR/reject-legacy" SYSTEMD_DIR="$TMP_DIR/reject-units" \
   RELEASE_DIR="$TMP_DIR/legacy" ARCH=amd64 bash "$ROOT/install.sh"
 [ ! -e "$TMP_DIR/reject-legacy" ] && [ ! -e "$TMP_DIR/reject-units" ] || fail "legacy package modified target"
-pass 'legacy release without native templates is rejected before installation'
+pass 'legacy release without Nodes-driven templates is rejected before installation'
+
+mkdir "$TMP_DIR/legacy-v1"
+mapfile -t legacy_members < <(tar -tzf "$TMP_DIR/release/sing-box-xboard-amd64.tar.gz" |
+  grep -vE '^(config.xboard.json|server.xboard.yml)$')
+tar -czf "$TMP_DIR/legacy-v1/sing-box-xboard-amd64.tar.gz" -C "$TMP_DIR/package" "${legacy_members[@]}"
+(cd "$TMP_DIR/legacy-v1" && sha256sum sing-box-xboard-amd64.tar.gz > SHA256SUMS.txt)
+expect_failure env INSTALL_DIR="$TMP_DIR/reject-v1" SYSTEMD_DIR="$TMP_DIR/reject-v1-units" \
+  RELEASE_DIR="$TMP_DIR/legacy-v1" ARCH=amd64 bash "$ROOT/install.sh"
+grep -q 'config.xboard.json' "$TMP_DIR/expected-failure.log" || fail "missing generic template not diagnosed"
+[ ! -e "$TMP_DIR/reject-v1" ] && [ ! -e "$TMP_DIR/reject-v1-units" ] || fail "old v1 package changed target"
+pass 'complete old thirteen-file package without generic templates is rejected'
 
 mkdir "$TMP_DIR/links" "$TMP_DIR/unsafe-release"
 ln -s "$TMP_DIR/original.json" "$TMP_DIR/links/LICENSE"
@@ -208,7 +324,8 @@ expect_failure bash "$ROOT/install.sh" legacy-product legacy-identity
 expect_failure env SMOKE_UID=1000 bash "$ROOT/install.sh"
 expect_failure env INSTANCE='../escape' bash "$ROOT/install.sh"
 expect_failure env SERVICE_PREFIX='bad prefix' bash "$ROOT/install.sh"
-expect_failure env PROTOCOL=unsupported bash "$ROOT/install.sh"
+expect_failure env PROTOCOL=anytls bash "$ROOT/install.sh"
+grep -q 'server.yml Nodes' "$TMP_DIR/expected-failure.log" || fail "removed PROTOCOL option lacks migration guidance"
 expect_failure env INSTALL_DIR='/tmp/../escape' bash "$ROOT/install.sh"
 expect_failure env SHARE=http://configs.example.test bash "$ROOT/sb-auto.sh" backend.json backend.yml
 expect_failure env SHARE=https://configs.example.test bash "$ROOT/sb-auto.sh" ../backend.json backend.yml
@@ -260,4 +377,4 @@ cmp "$TMP_DIR/before-auto.yml" "$TMP_DIR/install/demo.yml" || fail "failed initi
 grep -q '^disable xboard-sbc@demo.service$' "$SMOKE_LOG" || fail "failed enable did not restore disabled state"
 pass 'failed initial enable restores files and the previously disabled service state'
 
-printf 'All installer smoke tests passed; no real service or network operation was performed.\n'
+printf 'All installer smoke tests passed; no real system service or external network operation was performed.\n'

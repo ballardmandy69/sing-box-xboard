@@ -85,13 +85,17 @@ func decodeConfigContent(path string, content []byte) ([]byte, error) {
 		return nil, err
 	}
 	value = normalizeLegacyConfigValue(value)
+	if err := validateLegacyNodes(value); err != nil {
+		return nil, err
+	}
 	value = normalizeLegacyServerConfig(value)
 	return stdjson.Marshal(value)
 }
 
 func readConfig() ([]*OptionsEntry, error) {
 	var optionsList []*OptionsEntry
-	for _, path := range configPaths {
+	paths := append(append([]string(nil), configPaths...), serverConfigPaths...)
+	for _, path := range paths {
 		optionsEntry, err := readConfigAt(path)
 		if err != nil {
 			return nil, err

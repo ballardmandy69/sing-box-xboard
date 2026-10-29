@@ -1,8 +1,9 @@
-# 安装器生成 server.yml；保留重要的面板同步及运行错误日志。
+# 手工 JSON 入站的面板配置示例；自动 Nodes 模式见 USAGE.md。
 DisableAccessLog: false
 
 Nodes:
   - Type: UniProxy
+    StaticInbound: true
     UpdateInterval: "60s"
     ApiConfig:
       # 必须与 config.json 的入站 tag 一致。

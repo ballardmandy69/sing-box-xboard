@@ -6,18 +6,19 @@ This tree includes the XBoard UniProxy service, YAML configuration support, and 
 
 The nyafw-style installer includes standard Trojan, standard AnyTLS, and `anytls-native` templates using `config.json` + `server.yml`, without product identity or activation arguments. The panel API token is still required. Installation preserves existing configurations.
 
-The first matching native release is `v1.14.3-xboard-native.1`. As root on a Linux systemd server:
+This Nodes-driven deployment uses `v1.14.3-xboard-native.2`. As root on a Linux systemd server:
 
 ```bash
-VERSION=v1.14.3-xboard-native.1 bash <(curl -fLSs https://raw.githubusercontent.com/ballardmandy69/sing-box-xboard/v1.14.3-xboard-native.1/install.sh)
+VERSION=v1.14.3-xboard-native.2 bash <(curl -fLSs https://raw.githubusercontent.com/ballardmandy69/sing-box-xboard/v1.14.3-xboard-native.2/install.sh)
 ```
 
 Then edit `/opt/sing-box-xboard/server.yml` and start `xboard-sb@server.service`. This is an experimental custom protocol; existing public AnyTLS clients and panel subscriptions do not automatically become native clients.
 
-For a standard protocol, set `PROTOCOL=trojan` or `PROTOCOL=anytls` and provide existing certificate paths in `TLS_CERT_FILE` and `TLS_KEY_FILE`. Standard entries keep their original wire formats; the default remains `anytls-native`. All three template pairs are installed under `examples/`.
+Installation creates an empty `Nodes: []` configuration. Add any combination of Trojan, AnyTLS, and Native nodes to `server.yml`; the backend obtains their ports and users from the panel. Set `Protocol: anytls-native` only for the custom transport, retaining the panel's actual `ApiConfig.NodeType`. Standard entries keep their original wire formats. `ListenIP`, `ListenPort`, `CertConfig`, `ProxyProtocol`, and `AutoOutIP` are configured per node. Existing manual JSON inbounds remain supported.
 
 - [Installation, panel configuration, and systemd commands](docs/xboard-config.md)
 - [Native protocol and client configuration](docs/anytls-native.md)
+- Automatic node templates: [config.xboard.json](config.xboard.json), [server.xboard.yml](server.xboard.yml)
 - Native templates: [config.anytls-native.json](config.anytls-native.json), [server.anytls-native.yml](server.anytls-native.yml)
 - Standard templates: [Trojan](config.trojan.json), [AnyTLS](config.anytls.json)
 

@@ -20,6 +20,7 @@ jobs:
         run: >-
           go test -race ./transport/anytlsnative ./protocol/anytlsnative
           ./transport/trojan ./protocol/trojan ./protocol/anytls ./cmd/sing-box ./service/xboard
+          ./adapter/inbound ./common/listener ./common/dialer
       - name: AnyTLS interoperability
         working-directory: third_party/sing-anytls
         run: go test -race ./... -count=1 -timeout=180s
