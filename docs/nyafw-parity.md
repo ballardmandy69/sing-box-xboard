@@ -172,7 +172,7 @@ UniProxy 多面板按来源独立确认，失败来源保留待重试；已有�
   未配置 SbApi 时仍按周期清空队列。真实自有协议连接至本地接收端的集成及 race 已通过。
   `DisableAccessLog: true` 作为本实现保留的兼容别名映射模式 2，显式 AccessLog 优先；
   原二进制是否认此别名尚未证明，不能将别名扩展声称为原版行为。
-- `debug.listen` 的 `/debug/memory` 返回原字段与单位，`/debug/connections` 复用统一登记表，
+- `experimental.debug.listen` 的 `/debug/memory` 返回原字段与单位，`/debug/connections` 复用统一登记表，
   按连接数及分组键排序，`top=0` 返回空分组但保留登记总数；恢复原 pprof 路径与异步 GC 接口。
   `/sb/debug/users?tag=` 返回热用户过期时间；查询键保留原 `Node.ApiConfig.PanelTag`，
   不用 multi 首面板标签替换。未知标签返回 `wrong tag`，没有 provider 时返回空响应。
@@ -224,3 +224,14 @@ AnyTLS raw、Trojan 接受 AnyTLS、AnyTLS 的 Trojan/VLESS 双 fallback、IPLim
 重建保留原 UUID 与稳定计费身份，派生凭据可回显并按用户 7 上报 23/23 字节，未复制该故障。
 此项明确记为行为差异，不能把全批次记为完全一致。测试临时目录已清理，
 运行服务的状态、PID 和原件哈希均保持一致。
+
+另已使用用户指定的测试账号完成真实 UniProxy 面板验收：约 5.6 万用户表同步成功，
+AnyTLS 的正确/错误凭据、PROXY 头有无两种连接、IP=1 与同 IP 连接数=1 均按预期运行。
+在回环多 IP 上确认 AutoOutIP 绑定入站本机 IP；面板 API 接受上传、下载各 86,016 字节，
+在线报告包含 PROXY 声明的测试来源，均返回 HTTP 200。这证明接口上报被接受，
+不代表已读取面板数据库核对最终扣费。测试后另发送空在线快照并获 HTTP 200。
+该轮使用最终 CGO=0 开发构建（SHA-256
+`6fec9358d317fb96acd7f37a9b0577f5ae6ee7ad2d79a5c9ecb6659283c0c3a1`），
+无 SAN 自签证书通过证书指纹、链与有效期共同校验；轻负载启动后 RSS 约 139 MiB。
+未进行面板所设 4000 Mbps 的吞吐压测，未将轻负载数据当作峰值容量。
+该轮仅使用临时回环监听，进程、私钥副本及目录已清理；公网测试服务尚未部署。

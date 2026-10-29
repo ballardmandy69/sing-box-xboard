@@ -180,7 +180,7 @@ Native 的独立密钥仍在添加该协议时生成。使用自签证书时，�
 - `MultiApiConfig` 聚合四种 provider、全局与用户限速、IP/连接数/请求配额、ReportAlive。
 - 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
 - MemoryGuard 按系统可用内存关闭选中来源 IP 的连接，并按配置时长拒绝其新 TCP 连接。
-- `debug.listen` 提供原版的内存、连接榜、pprof、GC 和热用户缓存查询接口。
+- `experimental.debug.listen` 提供原版的内存、连接榜、pprof、GC 和热用户缓存查询接口。
 - OldV2Board、PPanel、SSPanel 使用各自请求格式；PPanel 与旧 SSPanel 的状态报告保留原样本固定值，不代表实时负载。
 - `BlockScanner` CEL 扫描规则和主面板正则规则已接入，拒绝原因写入 AccessLog。
 - 旧 DNS/FakeIP、GeoIP/Geosite、ip_on_demand、旧入站嗅探与域名策略。
@@ -212,10 +212,10 @@ MemoryGuard:
 比例按同一次内存压力事件首次出现连接时的来源 IP 数计算；连接关闭后基数保持不变。
 内存恢复只重置压力事件，尚未到期的 IP 封禁继续有效。
 
-开发分支可在 `config.json` 中设置 `"debug": {"listen": "127.0.0.1:9091"}`。
+开发分支可在 `config.json` 中设置 `"experimental": {"debug": {"listen": "127.0.0.1:9091"}}`。
 `/debug/memory` 查看内存，`/debug/connections?top=100` 查看连接分组，
 `/sb/debug/users?tag=面板标签` 查看热用户过期时间；multi 使用节点 `ApiConfig.PanelTag`，
-并非 `MultiApiConfig` 中首个面板的标签。`debug.listen` 省略时不会开放这些接口。
+并非 `MultiApiConfig` 中首个面板的标签。`experimental.debug.listen` 省略时不会开放这些接口。
 
 `MasterPassword` 设置在节点级。自动 Trojan/AnyTLS 的客户端凭据为
 `MD5(面板原始 UUID + MasterPassword)` 的小写十六进制，拼接不增加分隔符、不去除空白。
