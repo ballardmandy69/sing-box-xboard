@@ -50,7 +50,8 @@ func normalizeLegacyServerConfig(value any) any {
 		}
 		apiConfig, _ := node["ApiConfig"].(map[string]any)
 		panelType := legacyPanelType(node, apiConfig)
-		panelTag := legacyString(apiConfig["PanelTag"])
+		panelTag := legacyPanelTag(node, apiConfig)
+		debugPanelTag := panelTag
 		if panelTag == "" {
 			panelTag = "xboard-" + strconv.Itoa(index)
 		}
@@ -60,7 +61,7 @@ func normalizeLegacyServerConfig(value any) any {
 			"tag":              panelTag,
 			"inbound":          panelTag,
 			"sync_interval":    "0s",
-			"legacy_panel_tag": legacyString(apiConfig["PanelTag"]),
+			"legacy_panel_tag": debugPanelTag,
 		}
 		if panelType == "multi" {
 			rawPanels, _ := node["MultiApiConfig"].([]any)
@@ -99,10 +100,23 @@ func normalizeLegacyServerConfig(value any) any {
 			service["max_speed_limit"] = fmt.Sprint(maximum)
 		}
 		autoInbound := map[string]any{}
+		for legacyKey, field := range map[string]string{
+			"DisableTLS": "disable_tls", "TLSJson": "tls_json",
+			"AcceptAnyTLS": "accept_anytls", "FallbackService": "fallback_service",
+			"ForceMux": "force_mux", "ServerPadding": "server_padding", "PaddingScheme": "padding_scheme",
+			"VLESS": "vless", "DisableSniffing": "disable_sniffing",
+		} {
+			if value, exists := node[legacyKey]; exists {
+				autoInbound[field] = value
+			}
+		}
 		if obfs, exists := node["ShadowsocksObfsMu"]; exists {
 			autoInbound["shadowsocks_obfs_mu"] = obfs
 		}
 		if protocol := legacyString(node["Protocol"]); protocol != "" {
+			autoInbound["protocol"] = strings.ToLower(protocol)
+		} else if protocol := legacyString(node["NodeType"]); protocol != "" {
+			// The original top-level NodeType selects the inbound without changing the API query type.
 			autoInbound["protocol"] = strings.ToLower(protocol)
 		}
 		if listen := legacyString(node["ListenIP"]); listen != "" {
@@ -119,6 +133,9 @@ func normalizeLegacyServerConfig(value any) any {
 			}
 		}
 		certConfig, _ := node["CertConfig"].(map[string]any)
+		if policy, exists := certConfig["SniPolicy"]; exists {
+			autoInbound["sni_policy"] = policy
+		}
 		for legacyKey, field := range map[string]string{"CertFile": "certificate_path", "KeyFile": "key_path"} {
 			if path := legacyString(certConfig[legacyKey]); path != "" {
 				autoInbound[field] = path
@@ -266,7 +283,7 @@ func validateLegacyNodes(value any) error {
 		api, ok := node["ApiConfig"].(map[string]any)
 		panelType := legacyPanelType(node, api)
 		if !legacySupportedPanelType(panelType) && panelType != "multi" {
-			return fmt.Errorf("Nodes[%d].Type must be UniProxy, OldV2Board, PPanel or multi in the current reconstruction", index)
+			return fmt.Errorf("Nodes[%d].Type must be UniProxy, OldV2Board, PPanel, SSPanel or multi", index)
 		}
 		if panelType == "multi" {
 			panels, ok := node["MultiApiConfig"].([]any)
@@ -279,13 +296,14 @@ func validateLegacyNodes(value any) error {
 					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d] must be an object", index, child)
 				}
 				if kind := legacyString(panel["Type"]); kind != "" && !legacySupportedPanelType(strings.ToLower(kind)) {
-					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d].Type supports UniProxy, OldV2Board or PPanel", index, child)
+					return fmt.Errorf("Nodes[%d].MultiApiConfig[%d].Type supports UniProxy, OldV2Board, PPanel or SSPanel",
+						index, child)
 				}
 			}
 		} else if !ok {
 			return fmt.Errorf("Nodes[%d].ApiConfig must be an object", index)
 		}
-		tag := legacyString(api["PanelTag"])
+		tag := legacyPanelTag(node, api)
 		if tag == "" {
 			tag = "xboard-" + strconv.Itoa(index)
 		}
@@ -311,7 +329,14 @@ func validateLegacyNodes(value any) error {
 }
 
 func legacySupportedPanelType(kind string) bool {
-	return kind == "uniproxy" || kind == "oldv2board" || kind == "ppanel"
+	return kind == "uniproxy" || kind == "oldv2board" || kind == "ppanel" || kind == "sspanel"
+}
+
+func legacyPanelTag(node, api map[string]any) string {
+	if tag := legacyString(api["PanelTag"]); tag != "" {
+		return tag
+	}
+	return legacyString(node["PanelTag"])
 }
 
 func legacyPanelType(node, api map[string]any) string {

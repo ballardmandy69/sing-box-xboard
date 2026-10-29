@@ -37,12 +37,20 @@ func TestAutoInboundPanelOptions(t *testing.T) {
 	if len(options.PaddingScheme) != 0 || !options.TLS.Enabled {
 		t.Fatal("automatic AnyTLS changed default padding or TLS")
 	}
+	if !options.SniffEnabled || !options.SniffOverrideDestination || options.SniffTimeout != 0 ||
+		options.DomainStrategy != 0 {
+		t.Fatal("nyafw default sniffing must retain its original timeout and domain strategy defaults")
+	}
+	auto.DisableSniffing = true
 	auto.Listen, auto.ListenPort, auto.ProxyProtocol, auto.AutoOutIP = "::1", 9443, true, true
 	config, err = base.buildInboundConfig("anytls", auto)
 	if err != nil || config.endpoint.String() != "[::1]:9443" {
 		t.Fatalf("local overrides were not applied: %v, %v", config.endpoint, err)
 	}
 	options = config.options.(*option.AnyTLSInboundOptions)
+	if options.SniffEnabled || options.SniffOverrideDestination {
+		t.Fatal("DisableSniffing must disable both sniffing and destination override")
+	}
 	if !options.ProxyProtocol || !options.ProxyProtocolAcceptNoHeader || !options.AutoOutIP {
 		t.Fatal("legacy PROXY optional-header and AutoOutIP flags were not preserved")
 	}
@@ -79,12 +87,7 @@ func TestAutoInboundRejectsInvalidPanelSettings(t *testing.T) {
 		{name: "websocket", body: `{"server_port":443,"network":"ws"}`},
 		{name: "grpc", body: `{"server_port":443,"network":"grpc"}`},
 		{name: "transport settings", body: `{"server_port":443,"networkSettings":{"path":"/"}}`},
-		{name: "reality mode", body: `{"server_port":443,"tls":2}`},
-		{name: "disabled tls", body: `{"server_port":443,"tls":0}`},
-		{name: "reality settings", body: `{"server_port":443,"tls_settings":{"reality":{}}}`},
-		{name: "invalid tls settings", body: `{"server_port":443,"tls_settings":[]}`},
-		{name: "invalid alpn", body: `{"server_port":443,"tls_settings":{"alpn":true}}`},
-		{name: "invalid padding", body: `{"server_port":443,"padding_scheme":42}`},
+		{name: "malformed tls mode", body: `{"server_port":443,"tls":true}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

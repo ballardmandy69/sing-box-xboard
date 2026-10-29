@@ -161,10 +161,13 @@ Native 仅支持 TCP，复用 AnyTLS 串行会话和空闲连接池；没有新�
 - 热用户认证候选缓存、空闲连接清理、原版 AccessLog/SbApi；访问日志开关不会关闭运行错误日志。
 - MemoryGuard 按系统可用内存关闭选中来源 IP 的连接，并按配置时长拒绝其新 TCP 连接。
 - `debug.listen` 提供原版的内存、连接榜、pprof、GC 和热用户缓存查询接口。
-- OldV2Board、PPanel 使用各自请求格式；PPanel 的状态报告保留原样本固定值，不代表实时负载。
+- OldV2Board、PPanel、SSPanel 使用各自请求格式；PPanel 与旧 SSPanel 的状态报告保留原样本固定值，不代表实时负载。
 - `BlockScanner` CEL 扫描规则和主面板正则规则已接入，拒绝原因写入 AccessLog。
 - 旧 DNS/FakeIP、GeoIP/Geosite、ip_on_demand、旧入站嗅探与域名策略。
 - `ShadowsocksObfsMu` HTTP 前导机制。它不等于 WebSocket：101 后直接传输 SS 密文，没有 WS 帧。
+- `AcceptAnyTLS`、`FallbackService` 同端口组合，Trojan `ForceMux` / `ServerPadding` 和全局 SingMux 分发。
+- `TLSJson` 原字段覆盖、静态证书 `SniPolicy`、默认嗅探和本地 `VLESS` 选择。
+- SSPanel 检测规则与违规批量上报，失败保留批次，在下次同步时重试。
 
 当前源码的 `check` 不访问面板；运行后先同步用户、再同步节点配置，成功后才开放监听。
 首次同步失败会退避重试。安装烟测覆盖配置离线检查与真实节点进程启动两部分。
@@ -192,5 +195,5 @@ MemoryGuard:
 并非 `MultiApiConfig` 中首个面板的标签。`debug.listen` 省略时不会开放这些接口。
 
 所有代理 UDP 协议和 UDP 转发均排除，内部 DNS 保留配置语义。
-仍有 SSPanel、私有扩展组合、违规上报和 TLS/SNI 策略未完成；详细进度及证据限制见
+仍在补齐 MasterPassword、ShadowsocksBanIP、StaticInbound 的完整行为；详细进度及证据限制见
 [完整复现清单](nyafw-parity.md)。完成原版运行对照前，不称为完整兼容版。

@@ -36,7 +36,7 @@ type panelProvider interface {
 func newPanelClient(options option.XBoardPanelOptions) (*panelClient, error) {
 	options.PanelType = strings.ToLower(options.PanelType)
 	switch options.PanelType {
-	case "", "uniproxy", "oldv2board", "ppanel":
+	case "", "uniproxy", "oldv2board", "ppanel", "sspanel":
 	default:
 		return nil, errors.New("unsupported panel_type")
 	}
@@ -71,6 +71,8 @@ func newPanelClient(options option.XBoardPanelOptions) (*panelClient, error) {
 		result.provider, err = newOldV2BoardProvider(options.NodeType)
 	case "ppanel":
 		result.provider, err = newPPanelProvider(options.NodeType)
+	case "sspanel":
+		result.provider, err = newSSPanelProvider(options.NodeType)
 	}
 	if err != nil {
 		return nil, err
@@ -137,8 +139,8 @@ func (p *panelClient) request(
 
 func (p *panelClient) doRequest(request *http.Request, endpoint string) ([]byte, int, string, error) {
 	retries := 0
-	if p.options.PanelType == "oldv2board" || p.options.PanelType == "ppanel" {
-		// Both original constructors set Resty's RetryCount to three. HTTP status
+	if p.options.PanelType == "oldv2board" || p.options.PanelType == "ppanel" || p.options.PanelType == "sspanel" {
+		// These original constructors set Resty's RetryCount to three. HTTP status
 		// and panel JSON validation happen after Backoff and do not trigger retries.
 		retries = 3
 	}

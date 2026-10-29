@@ -63,6 +63,8 @@ type node struct {
 	trafficFactor   float64
 	access          sync.RWMutex
 	pushAccess      sync.Mutex
+	illegalAccess   sync.Mutex
+	illegal         []panelIllegalRecord
 	users           map[string]uint64
 	userPanels      map[string]*nodePanel
 	primary         *nodePanel
@@ -70,17 +72,36 @@ type node struct {
 	usersDirty      bool
 	userETag        string
 	configETag      string
+	pendingUsers    *pendingUserUpdate
+	pendingConfig   *pendingNodeConfig
 	auto            *autoInbound
 	autoOptions     option.XBoardAutoInboundOptions
 }
 
+// pendingNodeConfig retains a decoded response until its local listener changes are committed.
+// @author lyt
+// @date 2026-10-29
+type pendingNodeConfig struct {
+	response autoConfigResponse
+	etag     string
+}
+
+// pendingUserUpdate keeps a single source's decoded users across a failed local application.
+// @author lyt
+// @date 2026-10-29
+type pendingUserUpdate struct {
+	users []panelUser
+	etag  string
+}
+
 type panelUser struct {
-	ID               uint64 `json:"id"`
-	UUID             string `json:"uuid"`
-	ProtocolPassword string `json:"-"`
-	SpeedLimit       int64  `json:"speed_limit,omitempty"`
-	DeviceLimit      int16  `json:"device_limit,omitempty"`
-	ConnectionLimit  int32  `json:"connection_limit,omitempty"`
+	ID               uint64  `json:"id"`
+	UUID             string  `json:"uuid"`
+	ProtocolPassword string  `json:"-"`
+	SpeedLimit       int64   `json:"speed_limit,omitempty"`
+	SpeedLimitBytes  *uint64 `json:"-"`
+	DeviceLimit      int16   `json:"device_limit,omitempty"`
+	ConnectionLimit  int32   `json:"connection_limit,omitempty"`
 }
 
 type usersResponse struct {
@@ -396,7 +417,8 @@ func (n *node) syncCycle(ctx context.Context) error {
 
 func (n *node) pushReports(ctx context.Context) error {
 	trafficErr := n.pushTraffic(ctx)
-	return errors.Join(trafficErr, n.pushAlive(ctx))
+	aliveErr := n.pushAlive(ctx)
+	return errors.Join(trafficErr, aliveErr, n.pushIllegal(ctx))
 }
 
 func (n *node) syncUsers(ctx context.Context) error {
@@ -409,33 +431,50 @@ func (n *node) syncUsers(ctx context.Context) error {
 func (n *node) syncConfig(ctx context.Context) error {
 	config, status, etag, err := n.request(ctx, http.MethodGet, "config", n.configETag, nil)
 	if err != nil {
+		if successfulStatus(status) {
+			// A new, undecodable provider payload must not replay an older pending response.
+			n.pendingConfig = nil
+		}
 		return err
 	}
-	if status == http.StatusNotModified && n.auto != nil && !n.auto.hasCurrent() {
-		return E.New("initial xboard node configuration cannot be unchanged before a listener exists")
-	}
 	if successfulStatus(status) {
+		n.pendingConfig = nil
 		var response autoConfigResponse
 		if err = json.Unmarshal(config, &response); err != nil {
 			return E.New("invalid xboard node configuration response")
 		}
-		if err = n.syncNodePolicy(ctx); err != nil {
-			return err
+		response.providerNormalized = n.primary != nil && n.primary.client.provider != nil
+		if n.primary != nil && n.primary.client != nil {
+			response.rawNodeType = n.primary.client.options.NodeType
 		}
-		if n.auto != nil {
-			candidate, err := response.buildInboundConfig(n.nodeType, n.autoOptions)
-			if err != nil {
-				return E.Cause(err, "xboard configuration rejected; previous inbound retained")
-			}
-			if err = n.auto.replace(candidate); err != nil {
-				return E.Cause(err, "xboard configuration update failed")
-			}
-		}
-		n.applyConfigIntervals(response.configResponse)
-		n.configETag = etag
+		n.pendingConfig = &pendingNodeConfig{response: response, etag: etag}
 	} else if status == http.StatusNotModified {
-		return n.syncNodePolicy(ctx)
+		if n.pendingConfig == nil && n.auto != nil && !n.auto.hasCurrent() {
+			return E.New("initial xboard node configuration cannot be unchanged before a listener exists")
+		}
+	} else {
+		return nil
 	}
+	n.refreshNodeRules(ctx)
+	if err = n.syncNodePolicy(ctx); err != nil {
+		return err
+	}
+	if n.pendingConfig == nil {
+		return nil
+	}
+	pending := n.pendingConfig
+	if n.auto != nil {
+		candidate, err := pending.response.buildInboundConfig(n.nodeType, n.autoOptions)
+		if err != nil {
+			return E.Cause(err, "xboard configuration rejected; previous inbound retained")
+		}
+		if err = n.auto.replace(candidate); err != nil {
+			return E.Cause(err, "xboard configuration update failed")
+		}
+	}
+	n.applyConfigIntervals(pending.response.configResponse)
+	n.configETag = pending.etag
+	n.pendingConfig = nil
 	return nil
 }
 
@@ -445,21 +484,30 @@ func (n *node) syncUserList(ctx context.Context) error {
 	}
 	body, status, etag, err := n.request(ctx, http.MethodGet, "user", n.userETag, nil)
 	if err != nil {
+		if successfulStatus(status) {
+			n.pendingUsers = nil
+		}
 		return err
 	}
-	if status == http.StatusNotModified {
+	if status != http.StatusNotModified {
+		n.pendingUsers = nil
+		response, err := n.primary.client.decodeUsers(body)
+		if err != nil {
+			return E.Cause(err, "decode xboard users")
+		}
+		n.pendingUsers = &pendingUserUpdate{users: response.Users, etag: etag}
+	}
+	if n.pendingUsers == nil {
 		return nil
 	}
-	response, err := n.primary.client.decodeUsers(body)
-	if err != nil {
-		return E.Cause(err, "decode xboard users")
-	}
-	entries := make([]identifiedPanelUser, 0, len(response.Users))
-	for _, user := range response.Users {
+	pending := n.pendingUsers
+	entries := make([]identifiedPanelUser, 0, len(pending.users))
+	for _, user := range pending.users {
 		entries = append(entries, identifiedPanelUser{name: n.userName(user.ID), user: user})
 	}
 	if err = n.applyUsers(entries); err == nil {
-		n.userETag = etag
+		n.userETag = pending.etag
+		n.pendingUsers = nil
 	}
 	return err
 }
@@ -475,6 +523,9 @@ func (n *node) userName(id uint64) string {
 func (n *node) userLimits(user panelUser) usercontrol.Limits {
 	// The binary multiplies in 64 bits and then performs an unsigned shift, including signed input values.
 	speed := uint64(user.SpeedLimit*1_000_000) >> 3
+	if user.SpeedLimitBytes != nil {
+		speed = *user.SpeedLimitBytes
+	}
 	if speed == 0 || n.maxSpeed != 0 && speed > n.maxSpeed {
 		speed = n.maxSpeed
 	}

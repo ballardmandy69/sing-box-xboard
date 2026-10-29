@@ -44,6 +44,7 @@ func HandleMuxConnection(ctx context.Context, conn net.Conn, source M.Socksaddr,
 func newMuxConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, handler Handler, logger logger.ContextLogger) {
 	err := newMuxConnection0(ctx, conn, source, handler)
 	if err != nil {
+		conn.Close()
 		logger.ErrorContext(ctx, E.Cause(err, "process trojan-go multiplex connection"))
 	}
 }
@@ -71,7 +72,7 @@ func newMuxConnection0(ctx context.Context, conn net.Conn, source M.Socksaddr, h
 	case CommandTCP:
 		handler.NewConnectionEx(ctx, conn, source, destination, nil)
 	case CommandUDP:
-		handler.NewPacketConnectionEx(ctx, &PacketConn{Conn: conn}, source, destination, nil)
+		return ErrUDPDisabled
 	default:
 		return E.New("unknown command ", command)
 	}

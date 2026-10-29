@@ -28,15 +28,15 @@
 | --- | --- | --- |
 | 安装、双文件配置、多实例 | 三协议阶段版本已实现 | 原版所有非 UDP 配置组合可用，升级/回滚/重启行为对照 |
 | 旧版 JSON 配置 | GeoIP/Geosite、旧 DNS/FakeIP、ip_on_demand 与旧入站嗅探已接入 | 数据库、解析、嗅探和路由组合的原实例对照 |
-| 面板适配 | UniProxy、OldV2Board、PPanel 已实现；SSPanel 正在重建 | 每类请求认证、节点/用户/流量/规则与错误处理对照 |
+| 面板适配 | UniProxy、OldV2Board、PPanel、SSPanel 已接入 | 每类请求认证、节点/用户/流量/规则与错误处理对照 |
 | 多面板聚合 | UniProxy 聚合已接入首项主面板、按源缓存和流量分账 | 其余 provider、重复凭据的原版归属、缓存回收、主面板规则验证 |
 | 用户及统计 | 独立 ID@PanelTag@provider 身份与凭据；按成功快照扣费 | 上报失败保留、并发流量不丢失已测；用户删除时遗留统计仍需对照 |
 | 限速与配额 | 双向用户共享限速、活动 IP/连接及请求频率已接线 | 正常与边界单测、race 已过；原版运行性能与极端限速值待对照 |
 | 在线上报 | UniProxy ReportAlive 已实现；multi 按原版不报告在线 | 空对象清空在线、独立于流量开关已测；真实面板与 PROXY 来源对照 |
 | 协议范围 | Trojan/AnyTLS/Native/VMess/VLESS/SS/SS2022 已有真实 TCP 集成测试 | 其余传输、TLS 与私有扩展组合对照；并非所有组合都已支持 |
-| 私有协议扩展 | 已找到 AcceptAnyTLS、ForceMux、FallbackService 等真实分支 | 同端口组合、padding、obfs、TLS/SNI 策略与失败路径逐项验证 |
+| 私有协议扩展 | 同端口 AnyTLS/Trojan/VLESS、ForceMux、ServerPadding、TLSJson/SniPolicy 已接入 | MasterPassword、认证失败 IP 封禁及原实例组合行为仍待补齐/对照 |
 | 安全/资源管理 | 空闲连接清理、热认证缓存、MemoryGuard、BlockScanner 已接入 | 算法、触发条件、默认值与原实例资源行为对照 |
-| 访问日志 | 正常与规则拒绝记录、独立周期、SbApi gzip 上传已接入 | SSPanel 违规报告尚待重建；真实接收端对照 |
+| 访问日志 | 正常与规则拒绝记录、SbApi gzip 上传、周期违规队列已接入 | 真实接收端及失败重试时序对照 |
 | 调试接口 | 已恢复内存、连接榜、pprof、GC 与热用户过期表 | 单元及 race 已过；原版响应与运行资源指标待对照 |
 | UDP 排除 | 统一路由、托管流、代理 UDP 监听、QUIC 传输及 UDP 协议配置已加拒绝 | UDP 与 UDP-over-TCP 已有测试；继续审计绕过路径 |
 
@@ -50,7 +50,7 @@
 本分支单面板实现按上述规则修正，新增快照确认机制。确认绑定原计数器，
 不会减掉请求期间新增的流量，也不会误减同名用户删除重加后的新计数器。
 UniProxy 多面板按来源独立确认，失败来源保留待重试；已有部分失败与重试测试。
-不同 provider 使用各自请求和载荷；OldV2Board、PPanel 已接入，SSPanel 仍待补齐。
+不同 provider 使用各自请求和载荷；OldV2Board、PPanel、SSPanel 均有独立转换。
 
 ## 本分支已验证的新增行为
 
@@ -63,8 +63,18 @@ UniProxy 多面板按来源独立确认，失败来源保留待重试；已有�
   状态只在后续刷新发送，multi 不发送，失败不阻止配置或用户刷新。
   原配置解析不传递普通 SS2022 server key、SNI、Reality 或 VLESS flow，未擅自扩展这些字段。
   这些异常格式仍须通过原实例验证，不能视为推荐的面板 API 设计。
-- OldV2Board/PPanel 网络和响应体读取失败最多重试三次，复用原 POST body，等待支持取消；
+- OldV2Board/PPanel/SSPanel 网络和响应体读取失败最多重试三次，复用原 POST body，等待支持取消；
   HTTP 状态或 JSON 解析错误不重试。保留原重试语义，也保留响应丢失时 POST 可能重复送达的边界。
+- SSPanel 同时发送 `key`、`muKey`，用户、节点、规则各自缓存 ETag。
+  两代节点格式、`aliveip` 单数路径、浮点 Mbps 转精确字节速率、在线设备扣减已接入。
+  SS 使用面板 passwd，Trojan/AnyTLS 使用规范化 UUID，真实认证和计费链已有测试。
+  provider ETag 仍按原顺序更新；本地应用失败的有效配置和用户批次另行保留，
+  后续 304 时继续应用，避免证书/端口修复后仍无法恢复。新的不可解析响应不会重放旧候选。
+  SSPanel 面板节点 `node_speedlimit` 的最终消费仍未证实，不将其擅自当作节点总限速；
+  用户速度与本地 MaxSpeedLimit 的限制则实际生效。
+- 面板规则违规按原样累积重复记录；首次同步不上报，后续在流量/在线报告后、拉用户前发送。
+  上传期间持队列锁，失败保留整批，成功清空；multi 报告为空操作并确认清空。
+  它不受 `DisableUploadTraffic` 控制，CEL 扫描拒绝不会产生面板违规事件。
 - `MaxSpeedLimit` 与面板 `speed_limit` 保持不同单位语义，前者按原版 1024 倍率解析，后者按 Mbps。
   IP/连接数用户非零值覆盖全局；速度受节点或全局上限约束。
 - `ReportAlive` 发送去重后的活动 IP，最后连接关闭后发送 `{}` 清除在线信息；
@@ -85,6 +95,21 @@ UniProxy 多面板按来源独立确认，失败来源保留待重试；已有�
 - `ForceVision` 在托管 VLESS 中控制严格 Vision 或兼容普通 flow，并保留原 mux 例外。
   普通真实 TLS/Vision 组合已测；上游 Vision unsafe.Pointer 在 Go checkptr 下不兼容，
   该真实 Vision 测试明确排除 `-race`，不能声称它通过了 race。
+- AnyTLS 入站在同一 TCP 连接上按有效认证前缀区分 AnyTLS、VLESS、Trojan，5 秒完成分类。
+  `FallbackService` 优先于 `AcceptAnyTLS`；组合只接纳空或精确 `tcp` 传输。
+  保留完整协议解析，使用内部认证回调传递快照，不信任外部 metadata 中的用户字段。
+  原协议认证表依次发布，本实现共享不可变快照原子发布，避免混合代身份，这是并发改进。
+- 全局 SingMux 按特殊 FQDN 接管、不依赖端口；保留 detour 优先和 5 秒握手期限。
+  smux/yamux/h2mux、padding、多个逻辑流、子流身份检查及 UDP 拒绝已有真实 Box 测试。
+  `ForceMux` 按原边界只拒绝普通 IPv4 Trojan 目标；IPv6 与特殊复用目标不受此门禁限制。
+  `ServerPadding` 仅拆分前 19 次 Trojan 下行 Write，不增加随机数据或延迟。
+- `TLSJson` 解码为全新的原版 TLS 字段集合，优先于 DisableTLS、CertConfig 与面板 TLS。
+  默认 TLS 只使用原 provider 的开关及本地证书/SniPolicy，不补入面板 ServerName 或 ALPN。
+  SniPolicy 最后一行是正则，前导精确 `skip-ipv6` 允许真实 IPv6 来源跳过检查；
+  IPv4-mapped 地址不会跳过。静态证书握手含空 SNI 的匹配已测，错误正则返回配置错误而非原 panic。
+- 自动节点默认开启嗅探及目标覆盖，`DisableSniffing` 同时关闭两者。
+  仅原 `v2ray` 类型受本地 `VLESS` 或面板 VLESS 标记影响，显式 `vmess` 不因此改为 VLESS。
+  顶层 NodeType 只选择本地入站，ApiConfig.NodeType 仍用于 API；嵌套 PanelTag 优先于顶层缺省值。
 - 空闲连接每 120 秒（或 `ConnectionCleanupIntervalSec`）采样；连续两轮无字节变化才关闭。
   一个 Box 共用注册器，包装连接按底层连接去重，关闭外层释放连接/IP 配额。
 - MemoryGuard 读取 `/proc/meminfo` 的系统可用内存，按来源 IP 的登记连接数、流量排序，
@@ -122,10 +147,14 @@ UniProxy 多面板按来源独立确认，失败来源保留待重试；已有�
   不用 multi 首面板标签替换。未知标签返回 `wrong tag`，没有 provider 时返回空响应。
   监听绑定失败会明确使启动失败，保留上游 sing-box 的错误处理，这是与原异步绑定的已知差异。
 
-这些测试证明本实现的相应行为，尚不能证明所有行为与原版一致。SSPanel、私有协议组合、
-违规上报与 TLS/SNI 策略继续保留为缺口；未发布新版本冒充完整复现。
+这些测试证明本实现的相应行为，尚不能证明所有行为与原版一致。MasterPassword、
+ShadowsocksBanIP、StaticInbound 的完整原行为以及尚未核验的传输组合仍在继续审计；
+未发布新版本冒充完整复现。
 
 完整 Linux 回归曾受 WSL 网络命名空间权限和外部 TLS 分片测试超时影响；不将这些失败隐藏或记为通过。
+本机 Windows 10 build 19045 上，三项上游 Schannel TLS 1.3 测试失败；该系统不在微软正式支持范围，
+见 [Schannel 协议支持表](https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-)。
+新增 Go TLS 握手测试和 Linux TLS 包 race 通过；不将 Windows 系统 TLS 用例改名为通过。
 新增限额模块的 100% statement coverage 仅指该模块，不代表仓库整体达到 100% 覆盖。
 全仓回归还暴露原基线 OOM profile 对 Go 私有链接符号的依赖；已按 Go 1.26.5 BSD 许可保留
 必要本地 maps/ELF 解析逻辑，六类 profile 经 pprof 解析，相关实验包普通测试通过，未关闭链接检查。

@@ -49,6 +49,9 @@ func TestNodePolicyPublishesPrimaryRulesAndRejectLogs(t *testing.T) {
 	if err = registry.Check(context.Background(), &metadata, nil); !errors.Is(err, adapter.ErrManagedNodePolicyRejected) {
 		t.Fatalf("scanner did not reject the managed identity: %v", err)
 	}
+	if len(n.illegal) != 1 || n.illegal[0] != (panelIllegalRecord{UserID: 7, RuleID: 3}) {
+		t.Fatal("panel audit must enqueue a violation, while CEL rejection must not")
+	}
 	if len(n.accessLog.records) != 2 || n.accessLog.records[0].Outbound != "audit:3" ||
 		n.accessLog.records[0].Uid != 7 || n.accessLog.records[1].Outbound != "gfw:scanner" ||
 		n.accessLog.records[1].Uid != 8 || n.accessLog.records[1].Dst != "blocked.test:443" {

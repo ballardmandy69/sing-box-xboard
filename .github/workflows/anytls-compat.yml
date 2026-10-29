@@ -11,6 +11,9 @@ on:
       - 'common/memoryguard/**'
       - 'common/nodepolicy/**'
       - 'common/sniff/**'
+      - 'common/tls/**'
+      - 'option/tls.go'
+      - 'option/trojan.go'
       - 'adapter/node_policy.go'
       - 'adapter/debug.go'
       - 'debug*.go'
@@ -63,6 +66,9 @@ on:
       - 'common/memoryguard/**'
       - 'common/nodepolicy/**'
       - 'common/sniff/**'
+      - 'common/tls/**'
+      - 'option/tls.go'
+      - 'option/trojan.go'
       - 'adapter/node_policy.go'
       - 'adapter/debug.go'
       - 'debug*.go'
@@ -135,12 +141,12 @@ jobs:
       - name: Restored routing, DNS, accounting and TCP protocol behavior
         run: >-
           go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/...
-          ./dns/... ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff
+          ./dns/... ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff ./common/tls
           ./service/ssmapi . -count=1 -timeout=180s
       - name: Restored runtime races
         run: >-
           go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/...
-          ./dns/... ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff
+          ./dns/... ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff ./common/tls
           ./service/ssmapi . -count=1 -timeout=180s
       - name: OOM profile generation with default Go link checks
         run: go test ./experimental/libbox/internal/oomprofile ./experimental/libbox ./experimental/boxdd -count=1 -timeout=90s

@@ -2,7 +2,9 @@ package option
 
 type TrojanInboundOptions struct {
 	ListenOptions
-	Users []TrojanUser `json:"users,omitempty"`
+	Users         []TrojanUser `json:"users,omitempty"`
+	ForceMux      bool         `json:"force_mux,omitempty"`
+	ServerPadding bool         `json:"server_padding,omitempty"`
 	InboundTLSOptionsContainer
 	Fallback        *ServerOptions            `json:"fallback,omitempty"`
 	FallbackForALPN map[string]*ServerOptions `json:"fallback_for_alpn,omitempty"`

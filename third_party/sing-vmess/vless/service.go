@@ -81,12 +81,25 @@ func (s *Service[T]) updateUsers(userList []T, userUUIDList []string, userFlowLi
 }
 
 func (s *Service[T]) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
+	return s.NewConnectionWithAuthenticator(ctx, conn, source, onClose, nil)
+}
+
+// NewConnectionWithAuthenticator validates the UUID using a shared inbound credential snapshot.
+// A nil authenticator preserves ordinary service authentication and never trusts context identity.
+// @author lyt
+// @date 2026-10-29
+func (s *Service[T]) NewConnectionWithAuthenticator(ctx context.Context, conn net.Conn, source M.Socksaddr,
+	onClose N.CloseHandlerFunc, authenticate func([16]byte) (T, bool),
+) error {
 	request, err := ReadRequest(conn)
 	if err != nil {
 		return err
 	}
 	users := s.users.Load()
 	user, loaded := users.userMap[request.UUID]
+	if authenticate != nil {
+		user, loaded = authenticate(request.UUID)
+	}
 	if !loaded {
 		return E.New("unknown UUID: ", uuid.FromBytesOrNil(request.UUID[:]))
 	}

@@ -99,6 +99,7 @@ func TestLegacyPanelProvidersKeepRawNodeType(t *testing.T) {
 	for panelType, nodeTypes := range map[string][]string{
 		"oldv2board": {"v2ray", "trojan", "trojantidalab", "shadowsocks", "shadowsockstidalab"},
 		"ppanel":     {"v2ray", "vmess", "vless", "trojan", "anytls", "shadowsocks"},
+		"sspanel":    {"v2ray", "vmess", "vless", "trojan", "anytls", "shadowsocks"},
 	} {
 		for _, nodeType := range nodeTypes {
 			content := fmt.Sprintf(`Nodes:
@@ -124,5 +125,93 @@ func TestLegacyPanelProvidersKeepRawNodeType(t *testing.T) {
 				t.Fatal("legacy protocol alias was lost before provider-specific HTTP dispatch")
 			}
 		}
+	}
+}
+
+func TestLegacyTLSOverrideFields(t *testing.T) {
+	previous := globalCtx
+	globalCtx = include.Context(context.Background())
+	t.Cleanup(func() { globalCtx = previous })
+	const content = `Nodes:
+  - Type: UniProxy
+    DisableTLS: true
+    TLSJson: '{"enabled":true,"certificate_path":"override.pem","key_path":"override.key"}'
+    CertConfig:
+      CertFile: ignored.pem
+      KeyFile: ignored.key
+      SniPolicy: |-
+        skip-ipv6
+        ^allowed\.test$
+    ApiConfig:
+      PanelTag: tls-override
+      ApiHost: https://panel.example.test
+      ApiKey: local-test-token
+      NodeType: anytls
+      NodeID: 7
+`
+	path := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := readConfigAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auto := entry.options.Services[0].Options.(*option.XBoardServiceOptions).AutoInbound
+	if !auto.DisableTLS || auto.TLSJSON == "" || auto.SNIPolicy != "skip-ipv6\n^allowed\\.test$" ||
+		auto.CertificatePath != "ignored.pem" || auto.KeyPath != "ignored.key" {
+		t.Fatal("YAML conversion discarded TLS override precedence inputs")
+	}
+}
+
+func TestLegacyLocalProtocolAndEffectivePanelTag(t *testing.T) {
+	previous := globalCtx
+	globalCtx = include.Context(context.Background())
+	t.Cleanup(func() { globalCtx = previous })
+	for _, test := range []struct {
+		name, nodeType, topTag, apiTag, localProtocol, effectiveTag string
+	}{
+		{"local-protocol-and-top-tag", "Trojan", "outer-panel", "", "trojan", "outer-panel"},
+		{"nested-tag-wins", "Anytls", "outer-panel", "inner-panel", "anytls", "inner-panel"},
+		{"API-protocol-default", "", "", "inner-panel", "", "inner-panel"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := fmt.Sprintf(`Nodes:
+  - Type: oldv2board
+    NodeType: %q
+    PanelTag: %q
+    VLESS: true
+    DisableSniffing: true
+    ApiConfig:
+      PanelTag: %q
+      ApiHost: https://panel.example.test
+      ApiKey: local-test-token
+      NodeType: v2ray
+      NodeID: 4
+`, test.nodeType, test.topTag, test.apiTag)
+			path := filepath.Join(t.TempDir(), "server.yml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			entry, err := readConfigAt(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := entry.options.Services[0]
+			settings := service.Options.(*option.XBoardServiceOptions)
+			if settings.NodeType != "v2ray" || settings.AutoInbound == nil ||
+				settings.AutoInbound.Protocol != test.localProtocol {
+				t.Fatalf("local protocol override changed the API query type: API=%q auto=%#v",
+					settings.NodeType, settings.AutoInbound)
+			}
+			if service.Tag != test.effectiveTag || settings.Inbound != test.effectiveTag ||
+				settings.LegacyPanelTag == nil || *settings.LegacyPanelTag != test.effectiveTag {
+				t.Fatalf("effective panel tag differs across service/inbound/debug: service=%q inbound=%q debug=%v",
+					service.Tag, settings.Inbound, settings.LegacyPanelTag)
+			}
+			if !settings.AutoInbound.VLESS || !settings.AutoInbound.DisableSniffing {
+				t.Fatal("local VLESS or DisableSniffing setting was dropped")
+			}
+		})
 	}
 }

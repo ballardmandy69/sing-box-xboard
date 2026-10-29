@@ -9,6 +9,22 @@ import (
 	"github.com/sagernet/sing-box/common/nodepolicy"
 )
 
+func (n *node) refreshNodeRules(ctx context.Context) {
+	if n.primary == nil || n.primary.client == nil {
+		return
+	}
+	provider, ok := n.primary.client.provider.(interface {
+		RefreshNodeRules(context.Context, *panelClient) error
+	})
+	if !ok {
+		return
+	}
+	if err := provider.RefreshNodeRules(ctx, n.primary.client); err != nil && ctx.Err() == nil {
+		// A separate rule request must not discard a successfully fetched node configuration.
+		n.service.logger.Error("panel rule refresh failed; previous rules retained: ", err)
+	}
+}
+
 // syncNodePolicy publishes the primary panel's rules with current user lookup and access reporting.
 // @author lyt
 // @date 2026-10-29
@@ -34,8 +50,7 @@ func (n *node) syncNodePolicy(ctx context.Context) error {
 		LookupUser: n.lookupPolicyUser,
 		Rules:      rules,
 		OnBlocked:  n.recordPolicyRejection,
-		// OldV2Board's illegal-report method is a no-op. Other providers add their
-		// confirmed reporting callback when their rule/report protocol is implemented.
+		OnIllegal:  n.recordIllegal,
 	})
 	if err != nil {
 		return fmt.Errorf("update panel node policy: %w", err)

@@ -27,10 +27,10 @@ jobs:
       - name: Restored TCP protocol and runtime behavior
         run: |
           go test ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... \
-            ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff \
+            ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff ./common/tls \
             ./service/ssmapi . -count=1 -timeout=180s
           go test -race ./protocol/vmess ./protocol/vless ./protocol/shadowsocks ./route/... ./dns/... \
-            ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff \
+            ./common/usercontrol ./common/memoryguard ./common/nodepolicy ./common/sniff ./common/tls \
             ./service/ssmapi . -count=1 -timeout=180s
       - name: VMess authentication races
         working-directory: third_party/sing-vmess

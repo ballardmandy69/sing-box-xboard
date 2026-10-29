@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync/atomic"
 
+	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-mux"
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -23,6 +25,7 @@ type Handler interface {
 
 type Service[K comparable] struct {
 	users           atomic.Pointer[userSnapshot[K]]
+	serverPadding   atomic.Bool
 	handler         Handler
 	fallbackHandler N.TCPConnectionHandlerEx
 	logger          logger.ContextLogger
@@ -46,6 +49,12 @@ func NewService[K comparable](handler Handler, fallbackHandler N.TCPConnectionHa
 }
 
 var ErrUserExists = E.New("user already exists")
+var ErrUDPDisabled = C.ErrUDPDisabled
+
+// SetServerPadding controls wrapping of subsequently authenticated connections.
+func (s *Service[K]) SetServerPadding(enabled bool) {
+	s.serverPadding.Store(enabled)
+}
 
 func (s *Service[K]) UpdateUsers(userList []K, passwordList []string) error {
 	if len(userList) != len(passwordList) {
@@ -69,6 +78,28 @@ func (s *Service[K]) UpdateUsers(userList []K, passwordList []string) error {
 }
 
 func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
+	return s.NewConnectionWithAuthenticator(ctx, conn, source, onClose, nil)
+}
+
+// NewConnectionWithAuthenticator authenticates the wire header against a caller-owned immutable snapshot.
+// A nil authenticator uses this service's user table. Context users never bypass header authentication.
+func (s *Service[K]) NewConnectionWithAuthenticator(
+	ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc,
+	authenticate func([56]byte) (K, bool),
+) error {
+	if authenticate == nil {
+		authenticate = func(key [56]byte) (K, bool) {
+			user, loaded := s.users.Load().keys[key]
+			return user, loaded
+		}
+	}
+	return s.newConnection(ctx, conn, source, onClose, authenticate)
+}
+
+func (s *Service[K]) newConnection(
+	ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc,
+	authenticate func([56]byte) (K, bool),
+) error {
 	var key [KeyLength]byte
 	n, err := conn.Read(key[:])
 	if err != nil {
@@ -77,7 +108,7 @@ func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.
 		return s.fallback(ctx, conn, source, key[:n], E.New("bad request size"), onClose)
 	}
 
-	if user, loaded := s.users.Load().keys[key]; loaded {
+	if user, loaded := authenticate(key); loaded {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
 		return s.fallback(ctx, conn, source, key[:], E.New("bad request"), onClose)
@@ -111,11 +142,14 @@ func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.
 		return E.Cause(err, "skip crlf")
 	}
 
+	if command != CommandUDP && s.serverPadding.Load() && destination.Fqdn != mux.Destination.Fqdn {
+		conn = &serverPaddingConn{Conn: conn}
+	}
 	switch command {
 	case CommandTCP:
 		s.handler.NewConnectionEx(ctx, conn, source, destination, onClose)
 	case CommandUDP:
-		s.handler.NewPacketConnectionEx(ctx, &PacketConn{Conn: conn}, source, destination, onClose)
+		return ErrUDPDisabled
 	// case CommandMux:
 	default:
 		return HandleMuxConnection(ctx, conn, source, s.handler, s.logger, onClose)

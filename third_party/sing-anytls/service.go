@@ -103,6 +103,19 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 // NewConnectionWithAuth calls onAuthenticated after the complete authentication
 // header and padding, before session construction or destination processing.
 func (s *Service) NewConnectionWithAuth(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc, onAuthenticated func(context.Context) error) error {
+	return s.NewConnectionWithAuthenticator(ctx, conn, source, onClose, nil, onAuthenticated)
+}
+
+// NewConnectionWithAuthenticator validates the wire credential against a caller-owned snapshot.
+// A nil authenticator retains the service's ordinary authentication table; context users are never trusted.
+// @author lyt
+// @date 2026-10-29
+func (s *Service) NewConnectionWithAuthenticator(ctx context.Context, conn net.Conn, source M.Socksaddr,
+	onClose N.CloseHandlerFunc, authenticate func([32]byte) (string, bool), onAuthenticated func(context.Context) error,
+) error {
+	if authenticate == nil {
+		authenticate = s.lookupUser
+	}
 	// Authentication is a byte stream and can span TCP reads or TLS records.
 	// Read exactly each bounded field, leaving coalesced session frames on conn.
 	var header [34]byte
@@ -115,7 +128,7 @@ func (s *Service) NewConnectionWithAuth(ctx context.Context, conn net.Conn, sour
 	}
 	var passwordSha256 [32]byte
 	copy(passwordSha256[:], header[:32])
-	if user, ok := s.lookupUser(passwordSha256); ok {
+	if user, ok := authenticate(passwordSha256); ok {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
 		return s.fallbackPrefix(ctx, conn, source, header[:32], E.New("unknown user password"), onClose)

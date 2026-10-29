@@ -62,6 +62,16 @@ type XBoardAutoInboundOptions struct {
 	ProxyProtocol     bool   `json:"proxy_protocol,omitempty"`
 	AutoOutIP         bool   `json:"auto_out_ip,omitempty"`
 	ForceVision       bool   `json:"force_vision,omitempty"`
+	VLESS             bool   `json:"vless,omitempty"`
+	DisableSniffing   bool   `json:"disable_sniffing,omitempty"`
+	DisableTLS        bool   `json:"disable_tls,omitempty"`
+	TLSJSON           string `json:"tls_json,omitempty"`
+	SNIPolicy         string `json:"sni_policy,omitempty"`
+	AcceptAnyTLS      bool   `json:"accept_anytls,omitempty"`
+	FallbackService   string `json:"fallback_service,omitempty"`
+	ForceMux          bool   `json:"force_mux,omitempty"`
+	ServerPadding     bool   `json:"server_padding,omitempty"`
+	PaddingScheme     string `json:"padding_scheme,omitempty"`
 	ShadowsocksObfsMu string `json:"shadowsocks_obfs_mu,omitempty"`
 	CertificatePath   string `json:"certificate_path,omitempty"`
 	KeyPath           string `json:"key_path,omitempty"`

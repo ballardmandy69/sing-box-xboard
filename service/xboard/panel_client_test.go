@@ -61,7 +61,7 @@ func TestPanelClientConfiguration(t *testing.T) {
 }
 
 func TestPanelClientRejectsUnsupportedConfiguration(t *testing.T) {
-	for _, panelType := range []string{"sspanel", "multi", "unknown"} {
+	for _, panelType := range []string{"multi", "unknown"} {
 		t.Run(panelType, func(t *testing.T) {
 			options := panelTestOptions()
 			options.PanelType = panelType

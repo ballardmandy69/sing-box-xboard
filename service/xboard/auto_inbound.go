@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -36,21 +37,22 @@ type autoInboundInstance struct {
 // @date 2026-10-29
 type autoInbound struct {
 	inbound.Adapter
-	ctx         context.Context
-	registry    adapter.InboundRegistry
-	router      adapter.Router
-	logger      log.ContextLogger
-	access      sync.Mutex
-	current     *autoInboundInstance
-	stage       int
-	cleanupSet  bool
-	closed      bool
-	tracker     adapter.SSMTracker
-	users       []string
-	credentials []string
-	passwords   []string
-	hotUsers    []string
-	hotCallback func(string)
+	ctx          context.Context
+	registry     adapter.InboundRegistry
+	router       adapter.Router
+	logger       log.ContextLogger
+	access       sync.Mutex
+	current      *autoInboundInstance
+	stage        int
+	cleanupSet   bool
+	closed       bool
+	tracker      adapter.SSMTracker
+	users        []string
+	credentials  []string
+	passwords    []string
+	protocolType atomic.Pointer[string]
+	hotUsers     []string
+	hotCallback  func(string)
 }
 
 var _ adapter.ManagedSSMServer = (*autoInbound)(nil)
@@ -70,10 +72,19 @@ func newAutoInbound(ctx context.Context, registry adapter.InboundRegistry, route
 func newEmptyAutoInbound(ctx context.Context, registry adapter.InboundRegistry, router adapter.Router,
 	logger log.ContextLogger, tag, protocol string,
 ) *autoInbound {
-	return &autoInbound{
+	h := &autoInbound{
 		Adapter: inbound.NewAdapter(protocol, tag), ctx: ctx,
 		registry: registry, router: router, logger: logger, stage: -1,
 	}
+	h.protocolType.Store(&protocol)
+	return h
+}
+
+func (h *autoInbound) Type() string {
+	if protocol := h.protocolType.Load(); protocol != nil {
+		return *protocol
+	}
+	return h.Adapter.Type()
 }
 
 func (h *autoInbound) hasCurrent() bool {
@@ -251,6 +262,7 @@ func (h *autoInbound) replace(config autoInboundConfig) error {
 		return err
 	}
 	h.current = candidate
+	h.protocolType.Store(&config.protocol)
 	if rollback != nil {
 		rollback.scope.Close()
 	} else {
